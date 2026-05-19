@@ -1,11 +1,12 @@
-import { useGetPortfolio, useListPositions, useListOrders, useGetWatchlist, useGetPerformance, getListPositionsQueryKey } from "@workspace/api-client-react";
+import { useGetPortfolio, useListPositions, useListOrders, useGetWatchlist, useGetPerformance } from "@workspace/api-client-react";
 import { formatCurrency, formatPercentage, cn } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { Badge } from "@/components/ui/badge";
-import { ArrowUpRight, ArrowDownRight, Activity } from "lucide-react";
+import { ArrowUpRight, ArrowDownRight, Activity, Wifi, WifiOff } from "lucide-react";
 import { Link } from "wouter";
+import { useLivePrices } from "@/context/live-prices";
 
 function StatCard({ title, value, subValue, trend, isLoading }: { title: string, value: string, subValue?: string, trend?: "up" | "down" | "neutral", isLoading?: boolean }) {
   return (
@@ -42,14 +43,21 @@ export default function Dashboard() {
   const { data: positions, isLoading: isPositionsLoading } = useListPositions();
   const { data: orders, isLoading: isOrdersLoading } = useListOrders({ limit: 5 }, { query: { queryKey: ["orders", "limit5"] } });
   const { data: watchlist, isLoading: isWatchlistLoading } = useGetWatchlist();
+  const { prices: livePrices, flash, connected } = useLivePrices();
 
   const isUp = (portfolio?.dayPnl || 0) >= 0;
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-muted-foreground">Welcome back. Here's your portfolio overview.</p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
+          <p className="text-muted-foreground">Welcome back. Here's your portfolio overview.</p>
+        </div>
+        <div className={cn("flex items-center gap-1.5 text-xs mt-1", connected ? "text-success" : "text-muted-foreground")}>
+          {connected ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
+          {connected ? "Live" : "Connecting..."}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -149,17 +157,29 @@ export default function Dashboard() {
             ) : (
               <div className="space-y-4 mt-2">
                 {watchlist?.map(item => {
-                  const isPositive = (item.change || 0) >= 0;
+                  const live = livePrices[item.symbol];
+                  const price = live?.price ?? item.currentPrice ?? 0;
+                  const change = live?.change ?? item.change ?? 0;
+                  const changePct = live?.changePercent ?? item.changePercent ?? 0;
+                  const isPositive = change >= 0;
+                  const flashDir = flash[item.symbol];
                   return (
                     <div key={item.id} className="flex items-center justify-between">
                       <div>
                         <div className="font-medium">{item.symbol}</div>
                       </div>
                       <div className="text-right">
-                        <div className="font-medium">{item.currentPrice ? formatCurrency(item.currentPrice) : '-'}</div>
+                        <div className={cn(
+                          "font-medium tabular-nums transition-colors duration-300",
+                          flashDir === "up" && "text-success",
+                          flashDir === "down" && "text-destructive",
+                          !flashDir && "text-foreground"
+                        )}>
+                          {formatCurrency(price)}
+                        </div>
                         <div className={cn("text-xs flex items-center justify-end gap-1", isPositive ? "text-success" : "text-destructive")}>
                           {isPositive ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
-                          {Math.abs(item.changePercent || 0).toFixed(2)}%
+                          {Math.abs(changePct).toFixed(2)}%
                         </div>
                       </div>
                     </div>

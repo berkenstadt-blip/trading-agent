@@ -3,7 +3,7 @@ import { db } from "@workspace/db";
 import { agentsTable, ordersTable, portfolioTable, positionsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { CreateAgentBody, UpdateAgentBody } from "@workspace/api-zod";
-import { getSimulatedQuote } from "./market.js";
+import { getSimulatedQuote } from "../lib/market-data.js";
 
 const router = Router();
 

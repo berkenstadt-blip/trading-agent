@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useGetQuote, useGetWatchlist, useAddToWatchlist, useRemoveFromWatchlist, getGetWatchlistQueryKey, getGetQuoteQueryKey } from "@workspace/api-client-react";
 import { formatCurrency, formatNumber, cn } from "@/lib/utils";
+import { useLivePrices } from "@/context/live-prices";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,7 @@ export default function Market() {
   const [activeSymbol, setActiveSymbol] = useState<string | undefined>(undefined);
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const { prices: livePrices, flash } = useLivePrices();
 
   const { data: quote, isLoading: isQuoteLoading } = useGetQuote(
     { symbol: activeSymbol ?? "" },
@@ -160,7 +162,12 @@ export default function Market() {
               ) : (
                 <div className="space-y-2">
                   {watchlist?.map(item => {
-                    const isUp = (item.change ?? 0) >= 0;
+                    const live = livePrices[item.symbol];
+                    const price = live?.price ?? item.currentPrice ?? 0;
+                    const change = live?.change ?? item.change ?? 0;
+                    const changePct = live?.changePercent ?? item.changePercent ?? 0;
+                    const isUp = change >= 0;
+                    const flashDir = flash[item.symbol];
                     return (
                       <div
                         key={item.id}
@@ -172,14 +179,21 @@ export default function Market() {
                           <p className="font-medium text-sm">{item.symbol}</p>
                           <div className={cn("flex items-center gap-0.5 text-xs", isUp ? "text-success" : "text-destructive")}>
                             {isUp ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
-                            {Math.abs(item.changePercent ?? 0).toFixed(2)}%
+                            {Math.abs(changePct).toFixed(2)}%
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
                           <div className="text-right">
-                            <p className="text-sm font-semibold">{item.currentPrice ? formatCurrency(item.currentPrice) : "—"}</p>
+                            <p className={cn(
+                              "text-sm font-semibold tabular-nums transition-colors duration-300",
+                              flashDir === "up" && "text-success",
+                              flashDir === "down" && "text-destructive",
+                              !flashDir && "text-foreground"
+                            )}>
+                              {formatCurrency(price)}
+                            </p>
                             <p className={cn("text-xs", isUp ? "text-success" : "text-destructive")}>
-                              {isUp ? "+" : ""}{formatCurrency(item.change ?? 0)}
+                              {isUp ? "+" : ""}{formatCurrency(change)}
                             </p>
                           </div>
                           <Button
