@@ -1,17 +1,48 @@
 import { useState } from "react";
-import { useGetPerformance, useGetAnalyticsSummary, useGetAgentPerformance, getGetPerformanceQueryKey } from "@workspace/api-client-react";
-import { formatCurrency, formatNumber, cn } from "@/lib/utils";
+import {
+  useGetPerformance, useGetAnalyticsSummary, useGetAgentPerformance,
+  useGetAgentHistory, getGetPerformanceQueryKey, getGetAgentHistoryQueryKey,
+} from "@workspace/api-client-react";
+import { formatCurrency, cn } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from "recharts";
-import { TrendingUp, TrendingDown, Activity, Target } from "lucide-react";
+import {
+  AreaChart, Area, LineChart, Line, BarChart, Bar,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend,
+} from "recharts";
+import { Activity, Target, Bot, TrendingUp } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 
 const PERIODS = ["1d", "1w", "1m", "3m", "1y"] as const;
+const HISTORY_PERIODS = ["1w", "1m", "3m", "1y"] as const;
 type Period = typeof PERIODS[number];
+type HistoryPeriod = typeof HISTORY_PERIODS[number];
+
+// Custom tooltip for the multi-line agent chart
+function AgentHistoryTooltip({ active, payload, label }: { active?: boolean; payload?: { name: string; value: number; color: string }[]; label?: string }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="rounded-lg border border-border bg-popover p-3 shadow-md text-xs space-y-1.5 min-w-[160px]">
+      <p className="text-muted-foreground font-medium mb-1">{label ? new Date(label).toLocaleDateString([], { month: "short", day: "numeric" }) : ""}</p>
+      {payload.map(p => (
+        <div key={p.name} className="flex items-center justify-between gap-4">
+          <span className="flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-full shrink-0" style={{ background: p.color }} />
+            <span className="text-foreground truncate max-w-[100px]">{p.name}</span>
+          </span>
+          <span className={cn("font-semibold tabular-nums", p.value >= 0 ? "text-success" : "text-destructive")}>
+            {p.value >= 0 ? "+" : ""}{formatCurrency(p.value)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export default function Analytics() {
   const [period, setPeriod] = useState<Period>("1m");
+  const [histPeriod, setHistPeriod] = useState<HistoryPeriod>("1m");
 
   const { data: performance, isLoading: isPerformanceLoading } = useGetPerformance(
     { period },
@@ -19,8 +50,13 @@ export default function Analytics() {
   );
   const { data: summary, isLoading: isSummaryLoading } = useGetAnalyticsSummary();
   const { data: agentPerf, isLoading: isAgentPerfLoading } = useGetAgentPerformance();
+  const { data: agentHistory, isLoading: isAgentHistoryLoading } = useGetAgentHistory(
+    { period: histPeriod },
+    { query: { queryKey: getGetAgentHistoryQueryKey({ period: histPeriod }) } }
+  );
 
   const isReturn = (performance?.totalReturnPercent ?? 0) >= 0;
+  const dataPoints = (agentHistory?.dataPoints ?? []) as Record<string, number | string>[];
 
   return (
     <div className="space-y-6">
@@ -29,7 +65,7 @@ export default function Analytics() {
         <p className="text-muted-foreground">Portfolio performance and trading statistics.</p>
       </div>
 
-      {/* Performance Chart */}
+      {/* Equity Curve */}
       <Card className="bg-card border-border">
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -48,7 +84,7 @@ export default function Analytics() {
             <Skeleton className="h-[300px] w-full" />
           ) : (
             <>
-              <div className="flex items-center gap-6 mb-4">
+              <div className="flex flex-wrap items-center gap-6 mb-4">
                 <div>
                   <p className="text-xs text-muted-foreground uppercase">Total Return</p>
                   <p className={cn("text-2xl font-bold", isReturn ? "text-success" : "text-destructive")}>
@@ -69,12 +105,10 @@ export default function Analytics() {
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground uppercase">Sharpe Ratio</p>
-                  <p className="text-2xl font-bold">
-                    {(performance?.sharpeRatio ?? 0).toFixed(2)}
-                  </p>
+                  <p className="text-2xl font-bold">{(performance?.sharpeRatio ?? 0).toFixed(2)}</p>
                 </div>
               </div>
-              <div className="h-[280px] w-full">
+              <div className="h-[260px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={performance?.dataPoints ?? []} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
                     <defs>
@@ -84,33 +118,9 @@ export default function Analytics() {
                       </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
-                    <XAxis
-                      dataKey="date"
-                      tickFormatter={val => {
-                        const d = new Date(val);
-                        return period === "1d" ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString([], { month: "short", day: "numeric" });
-                      }}
-                      stroke="hsl(var(--muted-foreground))"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={false}
-                      interval="preserveStartEnd"
-                    />
-                    <YAxis
-                      tickFormatter={val => `$${(val / 1000).toFixed(1)}k`}
-                      domain={["auto", "auto"]}
-                      stroke="hsl(var(--muted-foreground))"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={false}
-                      width={60}
-                    />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: "hsl(var(--popover))", borderColor: "hsl(var(--border))", borderRadius: "8px", fontSize: "12px" }}
-                      itemStyle={{ color: "hsl(var(--foreground))" }}
-                      formatter={(val: number) => [formatCurrency(val), "Portfolio Value"]}
-                      labelFormatter={label => new Date(label).toLocaleDateString()}
-                    />
+                    <XAxis dataKey="date" tickFormatter={val => { const d = new Date(val); return period === "1d" ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString([], { month: "short", day: "numeric" }); }} stroke="hsl(var(--muted-foreground))" fontSize={11} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+                    <YAxis tickFormatter={val => `$${(val / 1000).toFixed(1)}k`} domain={["auto", "auto"]} stroke="hsl(var(--muted-foreground))" fontSize={11} tickLine={false} axisLine={false} width={60} />
+                    <Tooltip contentStyle={{ backgroundColor: "hsl(var(--popover))", borderColor: "hsl(var(--border))", borderRadius: "8px", fontSize: "12px" }} itemStyle={{ color: "hsl(var(--foreground))" }} formatter={(val: number) => [formatCurrency(val), "Portfolio Value"]} labelFormatter={label => new Date(label).toLocaleDateString()} />
                     <Area type="monotone" dataKey="portfolioValue" stroke="hsl(var(--primary))" strokeWidth={2} fillOpacity={1} fill="url(#colorEquity)" />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -120,8 +130,81 @@ export default function Analytics() {
         </CardContent>
       </Card>
 
+      {/* Agent Cumulative P&L History — full width */}
+      <Card className="bg-card border-border">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Bot className="h-4 w-4" /> Agent Cumulative P&amp;L History
+            </CardTitle>
+            <Tabs value={histPeriod} onValueChange={(v) => setHistPeriod(v as HistoryPeriod)}>
+              <TabsList className="h-8">
+                {HISTORY_PERIODS.map(p => <TabsTrigger key={p} value={p} className="text-xs px-3 h-7 uppercase">{p}</TabsTrigger>)}
+              </TabsList>
+            </Tabs>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {isAgentHistoryLoading ? (
+            <Skeleton className="h-[340px] w-full" />
+          ) : !agentHistory?.agents?.length ? (
+            <div className="text-center py-16 text-muted-foreground text-sm">No agent data. Create some agents and run them to see history.</div>
+          ) : (
+            <>
+              {/* Agent legend */}
+              <div className="flex flex-wrap gap-3 mb-4">
+                {agentHistory.agents.map(agent => (
+                  <div key={agent.id} className="flex items-center gap-1.5 text-xs">
+                    <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: agent.color }} />
+                    <span className="text-foreground font-medium">{agent.name}</span>
+                    <Badge variant="outline" className="text-[9px] h-4 px-1 capitalize border-muted-foreground/30 text-muted-foreground">
+                      {agent.strategy.replace(/_/g, " ")}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+              <div className="h-[300px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={dataPoints} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                    <XAxis
+                      dataKey="date"
+                      tickFormatter={val => new Date(val as string).toLocaleDateString([], { month: "short", day: "numeric" })}
+                      stroke="hsl(var(--muted-foreground))"
+                      fontSize={11} tickLine={false} axisLine={false}
+                      interval="preserveStartEnd"
+                    />
+                    <YAxis
+                      tickFormatter={val => `$${val >= 0 ? "" : "-"}${Math.abs(val / 1000).toFixed(1)}k`}
+                      domain={["auto", "auto"]}
+                      stroke="hsl(var(--muted-foreground))"
+                      fontSize={11} tickLine={false} axisLine={false}
+                      width={64}
+                    />
+                    {/* Zero reference line */}
+                    <CartesianGrid stroke="hsl(var(--border))" horizontal={false} />
+                    <Tooltip content={<AgentHistoryTooltip />} />
+                    {agentHistory.agents.map(agent => (
+                      <Line
+                        key={agent.id}
+                        type="monotone"
+                        dataKey={agent.name}
+                        stroke={agent.color}
+                        strokeWidth={2}
+                        dot={false}
+                        activeDot={{ r: 4, strokeWidth: 0 }}
+                      />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Trading Summary */}
+        {/* Trading Statistics */}
         <Card className="bg-card border-border">
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">
@@ -130,9 +213,7 @@ export default function Analytics() {
           </CardHeader>
           <CardContent>
             {isSummaryLoading ? (
-              <div className="space-y-3">
-                {[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-8 w-full" />)}
-              </div>
+              <div className="space-y-3">{[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-8 w-full" />)}</div>
             ) : (
               <div className="space-y-3">
                 {[
@@ -159,11 +240,11 @@ export default function Analytics() {
           </CardContent>
         </Card>
 
-        {/* Agent Performance Chart */}
+        {/* Agent P&L Bar Chart */}
         <Card className="bg-card border-border">
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">
-              <TrendingUp className="h-4 w-4" /> Agent Performance
+              <TrendingUp className="h-4 w-4" /> Agent Total P&amp;L
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -176,30 +257,12 @@ export default function Analytics() {
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={agentPerf} margin={{ top: 5, right: 5, left: 0, bottom: 40 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
-                    <XAxis
-                      dataKey="agentName"
-                      stroke="hsl(var(--muted-foreground))"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={false}
-                      angle={-30}
-                      textAnchor="end"
-                    />
-                    <YAxis
-                      tickFormatter={val => formatCurrency(val)}
-                      stroke="hsl(var(--muted-foreground))"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={false}
-                      width={80}
-                    />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: "hsl(var(--popover))", borderColor: "hsl(var(--border))", borderRadius: "8px", fontSize: "12px" }}
-                      formatter={(val: number) => [formatCurrency(val), "P&L"]}
-                    />
+                    <XAxis dataKey="agentName" stroke="hsl(var(--muted-foreground))" fontSize={11} tickLine={false} axisLine={false} angle={-30} textAnchor="end" />
+                    <YAxis tickFormatter={val => formatCurrency(val)} stroke="hsl(var(--muted-foreground))" fontSize={11} tickLine={false} axisLine={false} width={80} />
+                    <Tooltip contentStyle={{ backgroundColor: "hsl(var(--popover))", borderColor: "hsl(var(--border))", borderRadius: "8px", fontSize: "12px" }} formatter={(val: number) => [formatCurrency(val), "Total P&L"]} />
                     <Bar dataKey="totalPnl" radius={[4, 4, 0, 0]}>
                       {agentPerf.map((entry, index) => (
-                        <Cell key={index} fill={entry.totalPnl >= 0 ? "hsl(var(--success))" : "hsl(var(--destructive))"} fillOpacity={0.8} />
+                        <Cell key={index} fill={entry.totalPnl >= 0 ? "hsl(var(--success))" : "hsl(var(--destructive))"} fillOpacity={0.85} />
                       ))}
                     </Bar>
                   </BarChart>

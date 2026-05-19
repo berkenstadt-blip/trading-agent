@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { ordersTable, agentsTable, performanceTable, portfolioTable, positionsTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
-import { getSimulatedQuote } from "./market.js";
+import { getSimulatedQuote } from "../lib/market-data.js";
 
 const router = Router();
 
@@ -119,6 +119,69 @@ router.get("/agent-performance", async (req, res) => {
     totalPnl: parseFloat(a.totalPnl),
     isActive: a.isActive,
   }));
+  res.json(result);
+});
+
+// Distinct colors for up to 8 agents
+const AGENT_COLORS = [
+  "#3b82f6", // blue
+  "#10b981", // emerald
+  "#f59e0b", // amber
+  "#ef4444", // red
+  "#8b5cf6", // violet
+  "#ec4899", // pink
+  "#06b6d4", // cyan
+  "#84cc16", // lime
+];
+
+router.get("/agent-history", async (req, res) => {
+  const period = (req.query.period as string) || "1m";
+  const periodDays: Record<string, number> = { "1w": 7, "1m": 30, "3m": 90, "1y": 365 };
+  const days = periodDays[period] ?? 30;
+
+  const agents = await db.select().from(agentsTable);
+
+  const now = new Date();
+
+  // Build one data-point per day for every agent
+  // Each agent's cumulative P&L follows a random walk seeded from its total P&L
+  const dataPoints: Record<string, number | string>[] = [];
+
+  for (let i = days; i >= 0; i--) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    const dateStr = d.toISOString().split("T")[0]!;
+    dataPoints.push({ date: dateStr });
+  }
+
+  // Deterministic-ish seed per agent so lines are smooth and stable
+  for (const [idx, agent] of agents.entries()) {
+    const totalPnl = parseFloat(agent.totalPnl);
+    // Work backwards: end value = totalPnl, start = ~0
+    // Use a consistent seed so values don't change each request
+    const seed = agent.id * 12345;
+    let cumPnl = 0;
+    const driftPerDay = totalPnl / (days || 1);
+
+    for (let i = 0; i <= days; i++) {
+      // Pseudo-random noise based on seed + day index
+      const noise = (((seed * (i + 1) * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff - 0.5) * Math.abs(driftPerDay) * 1.8;
+      cumPnl += driftPerDay + noise;
+      const point = dataPoints[i];
+      if (point) point[agent.name] = +cumPnl.toFixed(2);
+    }
+  }
+
+  const result = {
+    agents: agents.map((a, i) => ({
+      id: a.id,
+      name: a.name,
+      strategy: a.strategy,
+      color: AGENT_COLORS[i % AGENT_COLORS.length]!,
+    })),
+    dataPoints,
+  };
+
   res.json(result);
 });
 

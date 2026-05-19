@@ -404,3 +404,23 @@ export const GetAgentPerformanceResponseItem = zod.object({
 export const GetAgentPerformanceResponse = zod.array(GetAgentPerformanceResponseItem)
 
 
+/**
+ * @summary Get cumulative P&L history per agent over time
+ */
+export const getAgentHistoryQueryPeriodDefault = `1m`;
+
+export const GetAgentHistoryQueryParams = zod.object({
+  "period": zod.enum(['1w', '1m', '3m', '1y']).default(getAgentHistoryQueryPeriodDefault)
+})
+
+export const GetAgentHistoryResponse = zod.object({
+  "agents": zod.array(zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "strategy": zod.string(),
+  "color": zod.string()
+})),
+  "dataPoints": zod.array(zod.record(zod.string(), zod.unknown())).describe('Array of daily data points; each object has a date key plus one key per agent name with its cumulative P&L value.')
+})
+
+

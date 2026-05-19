@@ -346,6 +346,21 @@ export interface AgentPerformance {
   isActive: boolean;
 }
 
+export interface AgentHistoryAgent {
+  id: number;
+  name: string;
+  strategy: string;
+  color: string;
+}
+
+export type AgentHistoryDataPointsItem = { [key: string]: unknown };
+
+export interface AgentHistory {
+  agents: AgentHistoryAgent[];
+  /** Array of daily data points; each object has a date key plus one key per agent name with its cumulative P&L value. */
+  dataPoints: AgentHistoryDataPointsItem[];
+}
+
 export type ListOrdersParams = {
 status?: ListOrdersStatus;
 limit?: number;
@@ -388,5 +403,19 @@ export const GetPerformancePeriod = {
   '3m': '3m',
   '1y': '1y',
   all: 'all',
+} as const;
+
+export type GetAgentHistoryParams = {
+period?: GetAgentHistoryPeriod;
+};
+
+export type GetAgentHistoryPeriod = typeof GetAgentHistoryPeriod[keyof typeof GetAgentHistoryPeriod];
+
+
+export const GetAgentHistoryPeriod = {
+  '1w': '1w',
+  '1m': '1m',
+  '3m': '3m',
+  '1y': '1y',
 } as const;
 

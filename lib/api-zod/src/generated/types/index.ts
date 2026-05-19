@@ -7,6 +7,9 @@
  */
 
 export * from './agent';
+export * from './agentHistory';
+export * from './agentHistoryAgent';
+export * from './agentHistoryDataPointsItem';
 export * from './agentInput';
 export * from './agentInputRiskLevel';
 export * from './agentInputStrategy';
@@ -19,6 +22,8 @@ export * from './agentStrategy';
 export * from './agentUpdate';
 export * from './agentUpdateRiskLevel';
 export * from './analyticsSummary';
+export * from './getAgentHistoryParams';
+export * from './getAgentHistoryPeriod';
 export * from './getPerformanceParams';
 export * from './getPerformancePeriod';
 export * from './getQuoteParams';

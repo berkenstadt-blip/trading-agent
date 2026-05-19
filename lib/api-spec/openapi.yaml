@@ -393,6 +393,26 @@ paths:
                 items:
                   $ref: "#/components/schemas/AgentPerformance"
 
+  /analytics/agent-history:
+    get:
+      operationId: getAgentHistory
+      tags: [analytics]
+      summary: Get cumulative P&L history per agent over time
+      parameters:
+        - in: query
+          name: period
+          schema:
+            type: string
+            enum: [1w, 1m, 3m, 1y]
+            default: 1m
+      responses:
+        "200":
+          description: Agent cumulative P&L time series
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentHistory"
+
 components:
   schemas:
     HealthStatus:
@@ -763,3 +783,31 @@ components:
           type: number
         isActive:
           type: boolean
+
+    AgentHistoryAgent:
+      type: object
+      required: [id, name, strategy, color]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        strategy:
+          type: string
+        color:
+          type: string
+
+    AgentHistory:
+      type: object
+      required: [agents, dataPoints]
+      properties:
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentHistoryAgent"
+        dataPoints:
+          description: Array of daily data points; each object has a date key plus one key per agent name with its cumulative P&L value.
+          type: array
+          items:
+            type: object
+            additionalProperties: true

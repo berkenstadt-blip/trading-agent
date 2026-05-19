@@ -21,11 +21,13 @@ import type {
 
 import type {
   Agent,
+  AgentHistory,
   AgentInput,
   AgentPerformance,
   AgentRunResult,
   AgentUpdate,
   AnalyticsSummary,
+  GetAgentHistoryParams,
   GetPerformanceParams,
   GetQuoteParams,
   HealthStatus,
@@ -1616,6 +1618,90 @@ export function useGetAgentPerformance<TData = Awaited<ReturnType<typeof getAgen
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetAgentPerformanceQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+export const getGetAgentHistoryUrl = (params?: GetAgentHistoryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/analytics/agent-history?${stringifiedParams}` : `/api/analytics/agent-history`
+}
+
+/**
+ * @summary Get cumulative P&L history per agent over time
+ */
+export const getAgentHistory = async (params?: GetAgentHistoryParams, options?: RequestInit): Promise<AgentHistory> => {
+
+  return customFetch<AgentHistory>(getGetAgentHistoryUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetAgentHistoryQueryKey = (params?: GetAgentHistoryParams,) => {
+    return [
+    `/api/analytics/agent-history`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetAgentHistoryQueryOptions = <TData = Awaited<ReturnType<typeof getAgentHistory>>, TError = ErrorType<unknown>>(params?: GetAgentHistoryParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAgentHistory>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetAgentHistoryQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAgentHistory>>> = ({ signal }) => getAgentHistory(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getAgentHistory>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetAgentHistoryQueryResult = NonNullable<Awaited<ReturnType<typeof getAgentHistory>>>
+export type GetAgentHistoryQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Get cumulative P&L history per agent over time
+ */
+
+export function useGetAgentHistory<TData = Awaited<ReturnType<typeof getAgentHistory>>, TError = ErrorType<unknown>>(
+ params?: GetAgentHistoryParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAgentHistory>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetAgentHistoryQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 
