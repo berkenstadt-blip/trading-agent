@@ -3,13 +3,26 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Paper trading system API with multi-agent AI
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: portfolio
+    description: Portfolio management
+  - name: positions
+    description: Open positions
+  - name: orders
+    description: Trade orders
+  - name: agents
+    description: AI trading agents
+  - name: market
+    description: Market data
+  - name: analytics
+    description: Portfolio analytics
+
 paths:
   /healthz:
     get:
@@ -24,6 +37,362 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /portfolio:
+    get:
+      operationId: getPortfolio
+      tags: [portfolio]
+      summary: Get portfolio summary
+      responses:
+        "200":
+          description: Portfolio summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Portfolio"
+
+  /portfolio/reset:
+    post:
+      operationId: resetPortfolio
+      tags: [portfolio]
+      summary: Reset portfolio to initial state
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PortfolioResetInput"
+      responses:
+        "200":
+          description: Portfolio reset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Portfolio"
+
+  /positions:
+    get:
+      operationId: listPositions
+      tags: [positions]
+      summary: List all open positions
+      responses:
+        "200":
+          description: List of positions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Position"
+
+  /orders:
+    get:
+      operationId: listOrders
+      tags: [orders]
+      summary: List all orders
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, filled, cancelled, all]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Order"
+    post:
+      operationId: placeOrder
+      tags: [orders]
+      summary: Place a manual trade order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrderInput"
+      responses:
+        "201":
+          description: Order placed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  /orders/{id}/cancel:
+    post:
+      operationId: cancelOrder
+      tags: [orders]
+      summary: Cancel a pending order
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Order cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  /agents:
+    get:
+      operationId: listAgents
+      tags: [agents]
+      summary: List all AI trading agents
+      responses:
+        "200":
+          description: List of agents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Agent"
+    post:
+      operationId: createAgent
+      tags: [agents]
+      summary: Create a new AI trading agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentInput"
+      responses:
+        "201":
+          description: Agent created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+
+  /agents/{id}:
+    get:
+      operationId: getAgent
+      tags: [agents]
+      summary: Get agent details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Agent details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+    patch:
+      operationId: updateAgent
+      tags: [agents]
+      summary: Update agent configuration
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentUpdate"
+      responses:
+        "200":
+          description: Agent updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+    delete:
+      operationId: deleteAgent
+      tags: [agents]
+      summary: Delete an agent
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Agent deleted
+
+  /agents/{id}/toggle:
+    post:
+      operationId: toggleAgent
+      tags: [agents]
+      summary: Enable or disable an agent
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Agent status toggled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+
+  /agents/{id}/run:
+    post:
+      operationId: runAgent
+      tags: [agents]
+      summary: Manually trigger agent analysis and potential trade
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Agent run result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRunResult"
+
+  /market/quote:
+    get:
+      operationId: getQuote
+      tags: [market]
+      summary: Get stock or option quote
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [stock, option]
+      responses:
+        "200":
+          description: Market quote
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketQuote"
+
+  /market/watchlist:
+    get:
+      operationId: getWatchlist
+      tags: [market]
+      summary: Get current watchlist
+      responses:
+        "200":
+          description: Watchlist items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WatchlistItem"
+    post:
+      operationId: addToWatchlist
+      tags: [market]
+      summary: Add symbol to watchlist
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WatchlistInput"
+      responses:
+        "201":
+          description: Added to watchlist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchlistItem"
+
+  /market/watchlist/{symbol}:
+    delete:
+      operationId: removeFromWatchlist
+      tags: [market]
+      summary: Remove symbol from watchlist
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Removed from watchlist
+
+  /analytics/performance:
+    get:
+      operationId: getPerformance
+      tags: [analytics]
+      summary: Get portfolio performance over time
+      parameters:
+        - name: period
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [1d, 1w, 1m, 3m, 1y, all]
+      responses:
+        "200":
+          description: Performance data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PerformanceData"
+
+  /analytics/summary:
+    get:
+      operationId: getAnalyticsSummary
+      tags: [analytics]
+      summary: Get trading analytics summary
+      responses:
+        "200":
+          description: Analytics summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsSummary"
+
+  /analytics/agent-performance:
+    get:
+      operationId: getAgentPerformance
+      tags: [analytics]
+      summary: Get per-agent performance breakdown
+      responses:
+        "200":
+          description: Agent performance breakdown
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AgentPerformance"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +403,363 @@ components:
       required:
         - status
 
+    Portfolio:
+      type: object
+      required: [id, cashBalance, totalValue, totalPnl, totalPnlPercent, dayPnl, dayPnlPercent, initialCapital, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        cashBalance:
+          type: number
+        totalValue:
+          type: number
+        totalPnl:
+          type: number
+        totalPnlPercent:
+          type: number
+        dayPnl:
+          type: number
+        dayPnlPercent:
+          type: number
+        initialCapital:
+          type: number
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    PortfolioResetInput:
+      type: object
+      properties:
+        initialCapital:
+          type: number
+
+    Position:
+      type: object
+      required: [id, symbol, assetType, quantity, avgCost, currentPrice, marketValue, unrealizedPnl, unrealizedPnlPercent, openedAt]
+      properties:
+        id:
+          type: integer
+        symbol:
+          type: string
+        assetType:
+          type: string
+          enum: [stock, option]
+        quantity:
+          type: number
+        avgCost:
+          type: number
+        currentPrice:
+          type: number
+        marketValue:
+          type: number
+        unrealizedPnl:
+          type: number
+        unrealizedPnlPercent:
+          type: number
+        optionType:
+          type: ["string", "null"]
+        strikePrice:
+          type: ["number", "null"]
+        expirationDate:
+          type: ["string", "null"]
+        openedAt:
+          type: string
+
+    Order:
+      type: object
+      required: [id, symbol, assetType, side, orderType, quantity, status, createdAt]
+      properties:
+        id:
+          type: integer
+        symbol:
+          type: string
+        assetType:
+          type: string
+          enum: [stock, option]
+        side:
+          type: string
+          enum: [buy, sell]
+        orderType:
+          type: string
+          enum: [market, limit, stop]
+        quantity:
+          type: number
+        limitPrice:
+          type: ["number", "null"]
+        stopPrice:
+          type: ["number", "null"]
+        filledPrice:
+          type: ["number", "null"]
+        status:
+          type: string
+          enum: [pending, filled, cancelled, rejected]
+        agentId:
+          type: ["integer", "null"]
+        agentName:
+          type: ["string", "null"]
+        reason:
+          type: ["string", "null"]
+        optionType:
+          type: ["string", "null"]
+        strikePrice:
+          type: ["number", "null"]
+        expirationDate:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+        filledAt:
+          type: ["string", "null"]
+
+    OrderInput:
+      type: object
+      required: [symbol, assetType, side, orderType, quantity]
+      properties:
+        symbol:
+          type: string
+        assetType:
+          type: string
+          enum: [stock, option]
+        side:
+          type: string
+          enum: [buy, sell]
+        orderType:
+          type: string
+          enum: [market, limit, stop]
+        quantity:
+          type: number
+        limitPrice:
+          type: number
+        stopPrice:
+          type: number
+        optionType:
+          type: string
+          enum: [call, put]
+        strikePrice:
+          type: number
+        expirationDate:
+          type: string
+
+    Agent:
+      type: object
+      required: [id, name, strategy, description, isActive, symbols, riskLevel, maxPositionSize, totalTrades, winRate, totalPnl, createdAt]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        strategy:
+          type: string
+          enum: [momentum, mean_reversion, breakout, trend_following, options_selling]
+        description:
+          type: string
+        isActive:
+          type: boolean
+        symbols:
+          type: array
+          items:
+            type: string
+        riskLevel:
+          type: string
+          enum: [low, medium, high]
+        maxPositionSize:
+          type: number
+        totalTrades:
+          type: integer
+        winRate:
+          type: number
+        totalPnl:
+          type: number
+        lastRunAt:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    AgentInput:
+      type: object
+      required: [name, strategy, symbols, riskLevel, maxPositionSize]
+      properties:
+        name:
+          type: string
+        strategy:
+          type: string
+          enum: [momentum, mean_reversion, breakout, trend_following, options_selling]
+        description:
+          type: string
+        symbols:
+          type: array
+          items:
+            type: string
+        riskLevel:
+          type: string
+          enum: [low, medium, high]
+        maxPositionSize:
+          type: number
+
+    AgentUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        symbols:
+          type: array
+          items:
+            type: string
+        riskLevel:
+          type: string
+          enum: [low, medium, high]
+        maxPositionSize:
+          type: number
+        isActive:
+          type: boolean
+
+    AgentRunResult:
+      type: object
+      required: [agentId, agentName, analysis, action, timestamp]
+      properties:
+        agentId:
+          type: integer
+        agentName:
+          type: string
+        analysis:
+          type: string
+        action:
+          type: string
+          enum: [bought, sold, held, no_signal]
+        orderPlaced:
+          type: ["object", "null"]
+        timestamp:
+          type: string
+
+    MarketQuote:
+      type: object
+      required: [symbol, price, change, changePercent, volume, high, low, open, previousClose, timestamp]
+      properties:
+        symbol:
+          type: string
+        price:
+          type: number
+        change:
+          type: number
+        changePercent:
+          type: number
+        volume:
+          type: integer
+        high:
+          type: number
+        low:
+          type: number
+        open:
+          type: number
+        previousClose:
+          type: number
+        marketCap:
+          type: ["number", "null"]
+        timestamp:
+          type: string
+
+    WatchlistItem:
+      type: object
+      required: [id, symbol, addedAt]
+      properties:
+        id:
+          type: integer
+        symbol:
+          type: string
+        currentPrice:
+          type: ["number", "null"]
+        change:
+          type: ["number", "null"]
+        changePercent:
+          type: ["number", "null"]
+        addedAt:
+          type: string
+
+    WatchlistInput:
+      type: object
+      required: [symbol]
+      properties:
+        symbol:
+          type: string
+
+    PerformanceDataPoint:
+      type: object
+      required: [date, portfolioValue, cashBalance, pnl]
+      properties:
+        date:
+          type: string
+        portfolioValue:
+          type: number
+        cashBalance:
+          type: number
+        pnl:
+          type: number
+
+    PerformanceData:
+      type: object
+      required: [period, dataPoints, totalReturn, totalReturnPercent, maxDrawdown, sharpeRatio]
+      properties:
+        period:
+          type: string
+        dataPoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/PerformanceDataPoint"
+        totalReturn:
+          type: number
+        totalReturnPercent:
+          type: number
+        maxDrawdown:
+          type: number
+        sharpeRatio:
+          type: number
+
+    AnalyticsSummary:
+      type: object
+      required: [totalTrades, winningTrades, losingTrades, winRate, avgWin, avgLoss, profitFactor, bestTrade, worstTrade, totalVolume]
+      properties:
+        totalTrades:
+          type: integer
+        winningTrades:
+          type: integer
+        losingTrades:
+          type: integer
+        winRate:
+          type: number
+        avgWin:
+          type: number
+        avgLoss:
+          type: number
+        profitFactor:
+          type: number
+        bestTrade:
+          type: number
+        worstTrade:
+          type: number
+        totalVolume:
+          type: number
+        stockTrades:
+          type: integer
+        optionTrades:
+          type: integer
+
+    AgentPerformance:
+      type: object
+      required: [agentId, agentName, strategy, totalTrades, winRate, totalPnl, isActive]
+      properties:
+        agentId:
+          type: integer
+        agentName:
+          type: string
+        strategy:
+          type: string
+        totalTrades:
+          type: integer
+        winRate:
+          type: number
+        totalPnl:
+          type: number
+        isActive:
+          type: boolean
