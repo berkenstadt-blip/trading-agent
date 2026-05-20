@@ -3,6 +3,7 @@ import { db } from "@workspace/db";
 import { portfolioTable, positionsTable, ordersTable, performanceTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
 import { ResetPortfolioBody } from "@workspace/api-zod";
+import * as alpaca from "../lib/alpaca.js";
 
 const router = Router();
 
@@ -24,7 +25,6 @@ async function computePortfolioSummary(portfolio: typeof portfolioTable.$inferSe
   const totalPnl = totalValue - initialCapital;
   const totalPnlPercent = initialCapital > 0 ? (totalPnl / initialCapital) * 100 : 0;
 
-  // Day P&L: compare with last performance snapshot
   const snapshots = await db
     .select()
     .from(performanceTable)
@@ -53,21 +53,54 @@ async function computePortfolioSummary(portfolio: typeof portfolioTable.$inferSe
 }
 
 router.get("/", async (req, res) => {
+  if (alpaca.isConfigured()) {
+    try {
+      const account = await alpaca.getAccount();
+      const equity = parseFloat(account.equity);
+      const lastEquity = parseFloat(account.last_equity);
+      const cash = parseFloat(account.cash);
+      const dayPnl = equity - lastEquity;
+      const dayPnlPercent = lastEquity > 0 ? (dayPnl / lastEquity) * 100 : 0;
+
+      // Use local DB for initial capital reference
+      const portfolio = await getOrCreatePortfolio();
+      const initialCapital = parseFloat(portfolio.initialCapital);
+      const totalPnl = equity - initialCapital;
+      const totalPnlPercent = initialCapital > 0 ? (totalPnl / initialCapital) * 100 : 0;
+
+      res.json({
+        id: portfolio.id,
+        cashBalance: cash,
+        totalValue: equity,
+        totalPnl,
+        totalPnlPercent,
+        dayPnl,
+        dayPnlPercent,
+        initialCapital,
+        buyingPower: parseFloat(account.buying_power),
+        createdAt: portfolio.createdAt.toISOString(),
+        updatedAt: portfolio.updatedAt.toISOString(),
+        source: "alpaca",
+      });
+      return;
+    } catch (err: any) {
+      req.log.warn({ err }, "Alpaca account fetch failed, falling back to simulated");
+    }
+  }
+
   const portfolio = await getOrCreatePortfolio();
   const summary = await computePortfolioSummary(portfolio);
-  res.json(summary);
+  res.json({ ...summary, source: "simulated" });
 });
 
 router.post("/reset", async (req, res) => {
   const parsed = ResetPortfolioBody.safeParse(req.body);
   const initialCapital = parsed.success && parsed.data.initialCapital ? parsed.data.initialCapital : 100000;
 
-  // Delete positions, orders, performance snapshots
   await db.delete(positionsTable);
   await db.delete(ordersTable);
   await db.delete(performanceTable);
 
-  // Reset portfolio
   const existing = await db.select().from(portfolioTable).limit(1);
   let portfolio;
   if (existing.length > 0) {
