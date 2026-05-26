@@ -1,27 +1,18 @@
 /**
- * ═══════════════════════════════════════════════════════════════════════════
- *  AEGIS TRADING ENGINE  — Ken Griffin-level multi-agent pipeline
- * ═══════════════════════════════════════════════════════════════════════════
+ * ═══════════════════════════════════════════════════════════════
+ *  AEGIS TRADING ENGINE v2 — Ken Griffin-level intelligence
+ * ═══════════════════════════════════════════════════════════════
  *
- *  PIPELINE (sequential, each agent feeds the next):
+ *  FULL PIPELINE:
  *
- *  1. RESEARCH AGENT   — macro context, sector rotation, historical bars,
- *                        fundamental snapshot, earnings calendar awareness
- *
- *  2. SENTIMENT AGENT  — news analysis (Alpaca News API), headline scoring,
- *                        fear/greed proxy, insider flow signals
- *
- *  3. STRATEGY AGENT   — full technical suite: RSI, MACD, Bollinger Bands,
- *                        ATR, EMA(9/21/50), volume ratio, support/resistance,
- *                        multi-timeframe confluence, regime detection
- *
- *  4. TRADER AGENT     — synthesizes all above, Kelly-fraction position sizing,
- *                        ATR-based stop-loss & take-profit, confidence gate,
- *                        daily loss limit guard, final execution decision
- *
- *  Each agent is a dedicated LLM call with a specialized system prompt.
- *  The trader only fires if all 3 upstream agents agree (or 2/3 with high conf).
- * ═══════════════════════════════════════════════════════════════════════════
+ *  0. SCANNER        — scan all symbols, pick only A+ / A grade
+ *  1. RESEARCH AGENT — macro, sector, catalysts, earnings risk
+ *  2. SENTIMENT AGENT — news scoring, fear/greed, headlines
+ *  3. STRATEGY AGENT — 15+ indicators, confluence, regime
+ *  4. TRADER AGENT   — final decision, Kelly sizing, R:R gate
+ *  5. RISK MANAGER   — circuit breaker, portfolio heat, stops
+ *  6. OPTIONS ENGINE — if IV elevated: suggest premium strategy
+ * ═══════════════════════════════════════════════════════════════
  */
 
 import { db } from "@workspace/db";
@@ -31,18 +22,27 @@ import OpenAI from "openai";
 import * as alpaca from "./alpaca.js";
 import { getSimulatedQuote } from "./market-data.js";
 import { logger } from "./logger.js";
+
 import {
-  rsi,
-  macd,
-  bollingerBands,
-  atr,
-  volumeRatio,
-  emaArray,
-  detectTrend,
-  supportResistance,
+  rsi, macd, bollingerBands, atr, volumeRatio, emaArray, detectTrend,
+  supportResistance, stochastic, williamsR, obv, vwap, ichimoku,
+  detectCandlePatterns, compositeSignalScore,
 } from "./indicators.js";
 
-// ─── Model config ─────────────────────────────────────────────────────────────
+import {
+  kellyFraction, computePositionSize, computeStopLevels,
+  checkCircuitBreaker, getPortfolioHeat, isMarketOpen, minutesToMarketClose,
+  computeTradeStats,
+} from "./risk-manager.js";
+
+import { findBestOpportunity, SymbolScan } from "./scanner.js";
+
+import {
+  blackScholes, analyzeIV, findBestOptionStrategy, IVContext,
+} from "./options-engine.js";
+
+// ─── OpenRouter client ────────────────────────────────────────
+
 const MODEL = "nousresearch/hermes-3-llama-3.1-70b";
 
 let _client: OpenAI | null = null;
@@ -55,61 +55,38 @@ function getClient(): OpenAI {
   return _client;
 }
 
-async function llmJSON<T>(system: string, user: string, maxTokens = 512): Promise<T> {
-  const client = getClient();
-  const resp = await client.chat.completions.create({
-    model: MODEL,
-    max_completion_tokens: maxTokens,
-    temperature: 0.15,
-    messages: [
-      { role: "system", content: system },
-      { role: "user",   content: user },
-    ],
+async function llmJSON<T>(system: string, user: string, maxTokens = 600): Promise<T> {
+  const resp = await getClient().chat.completions.create({
+    model: MODEL, max_completion_tokens: maxTokens, temperature: 0.1,
+    messages: [{ role: "system", content: system }, { role: "user", content: user }],
   });
   const raw = resp.choices[0]?.message?.content ?? "{}";
-  const cleaned = raw.replace(/```(?:json)?/gi, "").trim();
-  // Find first { ... } block
-  const match = cleaned.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error(`LLM returned non-JSON: ${cleaned.slice(0, 200)}`);
+  const match = raw.replace(/```(?:json)?/gi, "").trim().match(/\{[\s\S]*\}/);
+  if (!match) throw new Error(`LLM non-JSON: ${raw.slice(0, 100)}`);
   return JSON.parse(match[0]) as T;
 }
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────
 
 export interface AgentRunResult {
   action: "bought" | "sold" | "held" | "no_signal" | "error";
   analysis: string;
-  pipeline?: PipelineResult;
   orderPlaced: {
-    symbol: string;
-    side: "buy" | "sell";
-    quantity: number;
-    price: number;
-    stopLoss: number;
-    takeProfit: number;
-    alpacaId?: string;
+    symbol: string; side: "buy" | "sell"; quantity: number; price: number;
+    stopLoss: number; takeProfit: number; alpacaId?: string;
   } | null;
+  pipeline?: {
+    scanGrade: string; compositeScore: number;
+    confidence: number; kellyF: number;
+    circuitBreaker: string; optionSuggestion?: string;
+  };
 }
 
 interface MarketData {
-  symbol: string;
-  price: number;
-  changePercent: number;
-  change: number;
-  high: number;
-  low: number;
-  open: number;
-  prevClose: number;
-  volume: number;
+  symbol: string; price: number; changePercent: number; change: number;
+  high: number; low: number; open: number; prevClose: number; volume: number;
   source: "alpaca" | "simulated";
-  bars: {
-    closes: number[];
-    highs: number[];
-    lows: number[];
-    volumes: number[];
-    opens: number[];
-    timestamps: string[];
-  };
+  bars: { closes: number[]; highs: number[]; lows: number[]; volumes: number[]; opens: number[] };
   news: { headline: string; summary: string; created_at: string }[];
 }
 
@@ -119,13 +96,13 @@ interface ResearchOutput {
   earningsRisk: "high" | "low" | "none";
   catalysts: string[];
   headwinds: string[];
-  macroScore: number;       // -100 to +100
+  macroScore: number;
   reasoning: string;
 }
 
 interface SentimentOutput {
   overallSentiment: "bullish" | "bearish" | "neutral";
-  sentimentScore: number;   // -100 to +100
+  sentimentScore: number;
   newsSignal: "positive" | "negative" | "mixed" | "no_news";
   fearGreedProxy: "extreme_fear" | "fear" | "neutral" | "greed" | "extreme_greed";
   keyHeadlines: string[];
@@ -133,628 +110,423 @@ interface SentimentOutput {
 }
 
 interface TechnicalOutput {
-  rsi: number;
-  rsiSignal: "oversold" | "overbought" | "neutral";
-  macdCross: "bullish" | "bearish" | "none";
-  macdHistogram: number;
-  bbPercentB: number;
-  bbSignal: "squeeze" | "overextended_up" | "overextended_down" | "normal";
+  rsi: number; rsiSignal: "oversold" | "overbought" | "neutral";
+  macdCross: "bullish" | "bearish" | "none"; macdHistogram: number;
+  bbPercentB: number; bbSignal: "squeeze" | "overextended_up" | "overextended_down" | "normal";
   trend: "uptrend" | "downtrend" | "sideways";
-  ema9: number; ema21: number; ema50: number;
-  emaCrossSignal: "bullish" | "bearish" | "neutral";
-  volumeRatio: number;
-  volumeSignal: "high" | "low" | "normal";
-  atr: number;
-  atrPct: number;        // ATR as % of price
-  support: number;
-  resistance: number;
-  distToSupport: number;
-  distToResistance: number;
-  technicalScore: number; // -100 to +100
+  ema9: number; ema21: number; ema50: number; emaCrossSignal: "bullish" | "bearish" | "neutral";
+  volumeRatio: number; volumeSignal: "high" | "low" | "normal";
+  atr: number; atrPct: number;
+  support: number; resistance: number; distToSupport: number; distToResistance: number;
+  stochK: number; stochD: number; stochSignal: string;
+  williamsR: number; williamsSignal: string;
+  obvTrend: "accumulation" | "distribution" | "neutral";
+  vwapRelation: "above" | "below";
+  ichimokuCloud: "above" | "below" | "inside";
+  candlePattern: string; candleScore: number;
+  technicalScore: number;
   reasoning: string;
 }
 
 interface TraderDecision {
   action: "buy" | "sell" | "hold";
-  quantity: number;
-  confidence: number;        // 0–100
-  stopLossPct: number;       // e.g. 2.5 = 2.5% below entry
-  takeProfitPct: number;     // e.g. 5.0 = 5% above entry
-  riskRewardRatio: number;
-  positionSizePct: number;   // % of max position to use (Kelly-like)
-  reasoning: string;
-  conviction: "high" | "medium" | "low";
+  quantity: number; confidence: number;
+  stopLossPct: number; takeProfitPct: number;
+  riskRewardRatio: number; positionSizePct: number;
+  reasoning: string; conviction: "high" | "medium" | "low";
 }
 
-interface PipelineResult {
-  research: ResearchOutput;
-  sentiment: SentimentOutput;
-  technical: TechnicalOutput;
-  trader: TraderDecision;
-  compositeScore: number;    // weighted sum of all scores
-}
-
-// ─── Data Fetching ────────────────────────────────────────────────────────────
+// ─── Market data fetcher ──────────────────────────────────────
 
 async function fetchMarketData(symbol: string): Promise<MarketData> {
   let price = 0, changePercent = 0, change = 0, high = 0, low = 0,
       open = 0, prevClose = 0, volume = 0;
   let source: "alpaca" | "simulated" = "simulated";
-  let bars = { closes: [] as number[], highs: [] as number[], lows: [] as number[],
-               volumes: [] as number[], opens: [] as number[], timestamps: [] as string[] };
+  let bars = { closes: [] as number[], highs: [] as number[], lows: [] as number[], volumes: [] as number[], opens: [] as number[] };
   let news: { headline: string; summary: string; created_at: string }[] = [];
 
   if (alpaca.isConfigured()) {
     try {
-      // Live snapshot
       const snap = await alpaca.getSnapshot(symbol);
       price     = snap.latestTrade?.p ?? snap.minuteBar?.c ?? snap.dailyBar?.c ?? 0;
       prevClose = snap.prevDailyBar?.c ?? snap.dailyBar?.o ?? price;
       change    = +(price - prevClose).toFixed(4);
       changePercent = prevClose > 0 ? +((change / prevClose) * 100).toFixed(4) : 0;
-      high   = snap.dailyBar?.h ?? price;
-      low    = snap.dailyBar?.l ?? price;
-      open   = snap.dailyBar?.o ?? price;
-      volume = snap.dailyBar?.v ?? 0;
+      high = snap.dailyBar?.h ?? price; low = snap.dailyBar?.l ?? price;
+      open = snap.dailyBar?.o ?? price; volume = snap.dailyBar?.v ?? 0;
       source = "alpaca";
-    } catch (e) {
-      logger.warn({ e, symbol }, "Snapshot failed, using simulated");
-    }
+    } catch (e) { logger.warn({ e, symbol }, "Snapshot failed"); }
 
     try {
-      // 60-day daily bars for indicators
       const rawBars = await alpaca.getDailyBars(symbol, 60);
-      if (rawBars.length > 10) {
-        bars = {
-          closes:     rawBars.map(b => b.c),
-          highs:      rawBars.map(b => b.h),
-          lows:       rawBars.map(b => b.l),
-          volumes:    rawBars.map(b => b.v),
-          opens:      rawBars.map(b => b.o),
-          timestamps: rawBars.map(b => b.t),
-        };
-        // If live price available, append current day
+      if (rawBars.length > 15) {
+        bars = { closes: rawBars.map(b => b.c), highs: rawBars.map(b => b.h),
+                 lows: rawBars.map(b => b.l), volumes: rawBars.map(b => b.v),
+                 opens: rawBars.map(b => b.o) };
         if (price > 0) {
-          bars.closes.push(price);
-          bars.highs.push(Math.max(high, price));
-          bars.lows.push(Math.min(low, price));
-          bars.volumes.push(volume);
-          bars.opens.push(open);
-          bars.timestamps.push(new Date().toISOString());
+          bars.closes.push(price); bars.highs.push(Math.max(high, price));
+          bars.lows.push(Math.min(low, price)); bars.volumes.push(volume); bars.opens.push(open);
         }
       }
-    } catch (e) {
-      logger.warn({ e, symbol }, "Daily bars failed");
-    }
+    } catch (e) { logger.warn({ e, symbol }, "Bars failed"); }
 
     try {
       const articles = await alpaca.getNews(symbol, 15);
-      news = articles.map(a => ({
-        headline:   a.headline,
-        summary:    a.summary?.slice(0, 300) ?? "",
-        created_at: a.created_at,
-      }));
-    } catch (e) {
-      logger.warn({ e, symbol }, "News fetch failed");
-    }
+      news = articles.map(a => ({ headline: a.headline, summary: (a.summary ?? "").slice(0, 300), created_at: a.created_at }));
+    } catch (e) { logger.warn({ e, symbol }, "News failed"); }
   }
 
-  // Fallback to simulated if no real data
   if (price === 0) {
     const q = getSimulatedQuote(symbol);
     price = q.price; change = q.change; changePercent = q.changePercent;
-    high = q.high; low = q.low; open = q.open; prevClose = q.previousClose;
-    volume = q.volume;
+    high = q.high; low = q.low; open = q.open; prevClose = q.previousClose; volume = q.volume;
   }
 
-  // Fallback bars from simulated price drift
-  if (bars.closes.length < 14) {
-    const synth: number[] = [];
+  if (bars.closes.length < 15) {
     let p = prevClose;
+    const synth = { closes: [] as number[], highs: [] as number[], lows: [] as number[], volumes: [] as number[], opens: [] as number[] };
     for (let i = 0; i < 60; i++) {
-      p = +(p * (1 + (Math.random() - 0.498) * 0.015)).toFixed(2);
-      synth.push(p);
+      p = Math.max(1, +(p * (1 + (Math.random() - 0.498) * 0.015)).toFixed(2));
+      synth.closes.push(p); synth.highs.push(+(p * 1.006).toFixed(2));
+      synth.lows.push(+(p * 0.994).toFixed(2)); synth.volumes.push(volume + Math.floor(Math.random() * 500000));
+      synth.opens.push(p);
     }
-    synth.push(price);
-    bars = {
-      closes:     synth,
-      highs:      synth.map(c => +(c * 1.005).toFixed(2)),
-      lows:       synth.map(c => +(c * 0.995).toFixed(2)),
-      volumes:    synth.map(() => volume + Math.floor(Math.random() * 500000)),
-      opens:      synth,
-      timestamps: synth.map((_, i) => new Date(Date.now() - (60 - i) * 86400000).toISOString()),
-    };
+    synth.closes.push(price); synth.highs.push(Math.max(high, price));
+    synth.lows.push(Math.min(low, price)); synth.volumes.push(volume); synth.opens.push(open);
+    bars = synth;
   }
 
-  return { symbol: symbol.toUpperCase(), price, changePercent, change,
-           high, low, open, prevClose, volume, source, bars, news };
+  return { symbol: symbol.toUpperCase(), price, changePercent, change, high, low, open, prevClose, volume, source, bars, news };
 }
 
-// ─── AGENT 1: RESEARCH ────────────────────────────────────────────────────────
-
-async function runResearchAgent(symbol: string, md: MarketData): Promise<ResearchOutput> {
-  const system = `You are the RESEARCH AGENT for an elite quantitative hedge fund.
-Your job: analyze macro regime, sector dynamics, and fundamental catalysts for a stock.
-
-OUTPUT: respond ONLY with a valid JSON object — no markdown, no preamble.
-Schema:
-{
-  "macroRegime": "risk-on" | "risk-off" | "neutral",
-  "sectorStrength": "strong" | "weak" | "neutral",
-  "earningsRisk": "high" | "low" | "none",
-  "catalysts": ["string", ...],        // up to 3 bullish catalysts
-  "headwinds": ["string", ...],        // up to 3 risks
-  "macroScore": number,                // -100 (bearish) to +100 (bullish)
-  "reasoning": "string"                // max 300 chars
-}`;
-
-  const priceHistory = md.bars.closes.slice(-10).map(c => `$${c.toFixed(2)}`).join(", ");
-  const newsBlob = md.news.length > 0
-    ? md.news.slice(0, 8).map((n, i) =>
-        `[${i+1}] (${n.created_at.slice(0,10)}) ${n.headline}`
-      ).join("\n")
-    : "No recent news available.";
-
-  const user = `SYMBOL: ${symbol}
-CURRENT PRICE: $${md.price.toFixed(2)}  |  DAY CHANGE: ${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}%
-10-DAY PRICE HISTORY: ${priceHistory}
-52-DAY HIGH: $${Math.max(...md.bars.closes).toFixed(2)}  |  52-DAY LOW: $${Math.min(...md.bars.closes).toFixed(2)}
-VOLUME: ${(md.volume / 1_000_000).toFixed(2)}M  |  DATA SOURCE: ${md.source}
-
-RECENT NEWS (last 8 articles):
-${newsBlob}
-
-MACRO CONTEXT (as of today):
-- Fed rates: elevated, "higher for longer" stance
-- USD: strong globally
-- Market breadth: mixed, tech leading
-- VIX environment: moderate volatility regime
-
-Analyze this stock from a macro/fundamental/catalyst perspective.`;
-
-  return llmJSON<ResearchOutput>(system, user, 400);
-}
-
-// ─── AGENT 2: SENTIMENT ───────────────────────────────────────────────────────
-
-async function runSentimentAgent(symbol: string, md: MarketData, research: ResearchOutput): Promise<SentimentOutput> {
-  const system = `You are the SENTIMENT AGENT for an elite quantitative hedge fund.
-Your job: analyze news sentiment, social signals, and market fear/greed dynamics.
-
-OUTPUT: respond ONLY with a valid JSON object — no markdown, no preamble.
-Schema:
-{
-  "overallSentiment": "bullish" | "bearish" | "neutral",
-  "sentimentScore": number,           // -100 to +100
-  "newsSignal": "positive" | "negative" | "mixed" | "no_news",
-  "fearGreedProxy": "extreme_fear" | "fear" | "neutral" | "greed" | "extreme_greed",
-  "keyHeadlines": ["string"],          // top 3 most impactful headlines
-  "reasoning": "string"               // max 300 chars
-}`;
-
-  const newsBlob = md.news.length > 0
-    ? md.news.map((n, i) =>
-        `[${i+1}] ${n.headline}\n    Summary: ${n.summary || "N/A"}`
-      ).join("\n\n")
-    : "No news available.";
-
-  const user = `SYMBOL: ${symbol}
-CURRENT PRICE: $${md.price.toFixed(2)}  (${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}% today)
-
-MACRO REGIME from Research Agent: ${research.macroRegime.toUpperCase()} | Macro Score: ${research.macroScore}
-CATALYSTS: ${research.catalysts.join("; ") || "none identified"}
-HEADWINDS: ${research.headwinds.join("; ") || "none identified"}
-
-ALL RECENT NEWS:
-${newsBlob}
-
-Price behavior context:
-- Today's range: $${md.low.toFixed(2)} – $${md.high.toFixed(2)}
-- Previous close: $${md.prevClose.toFixed(2)}
-- Volume vs normal: ${(md.volume / 1_000_000).toFixed(2)}M shares
-
-Analyze the sentiment landscape for this stock.`;
-
-  return llmJSON<SentimentOutput>(system, user, 400);
-}
-
-// ─── AGENT 3: STRATEGY (Technical) ───────────────────────────────────────────
+// ─── Compute all technicals ───────────────────────────────────
 
 function computeTechnicals(md: MarketData): Omit<TechnicalOutput, "reasoning"> {
-  const { closes, highs, lows, volumes } = md.bars;
+  const { closes, highs, lows, volumes, opens } = md.bars;
   const price = md.price;
 
-  // RSI
-  const rsiVal = rsi(closes, 14);
-  const rsiSignal: TechnicalOutput["rsiSignal"] =
-    rsiVal < 35 ? "oversold" : rsiVal > 65 ? "overbought" : "neutral";
+  const rsiVal     = rsi(closes, 14);
+  const macdRes    = macd(closes);
+  const bb         = bollingerBands(closes, 20);
+  const volR       = volumeRatio(volumes, 20);
+  const trend      = detectTrend(closes, 20);
+  const atrVal     = atr(highs, lows, closes, 14);
+  const atrPct     = price > 0 ? +(atrVal / price * 100).toFixed(2) : 2;
+  const sr         = supportResistance(highs, lows, price);
+  const stoch      = stochastic(highs, lows, closes, 14, 3);
+  const willR      = williamsR(highs, lows, closes, 14);
+  const obvRes     = obv(closes, volumes);
+  const vwapVal    = vwap(highs, lows, closes, volumes);
+  const ichi       = ichimoku(highs, lows, closes);
+  const candles    = detectCandlePatterns(opens, highs, lows, closes);
 
-  // MACD
-  const macdResult = macd(closes);
-  const macdCross = macdResult.crossover;
+  const e9 = emaArray(closes, 9), e21 = emaArray(closes, 21), e50 = emaArray(closes, 50);
+  const ema9 = e9[e9.length - 1] ?? price, ema21 = e21[e21.length - 1] ?? price, ema50 = e50[e50.length - 1] ?? price;
 
-  // Bollinger Bands
-  const bb = bollingerBands(closes, 20);
+  const emaCrossSignal: TechnicalOutput["emaCrossSignal"] =
+    (ema9 > ema21 && ema21 > ema50) ? "bullish" : (ema9 < ema21 && ema21 < ema50) ? "bearish" : "neutral";
+
+  const { score } = compositeSignalScore({
+    rsiVal, macdHistogram: macdRes.histogram, macdCross: macdRes.crossover,
+    bbPercentB: bb.percentB, ema9, ema21, ema50, price, volRatio: volR,
+    changePercent: md.changePercent, candleScore: candles.patternScore,
+    obvTrend: obvRes.trend, stochK: stoch.k, williamsRVal: willR.value,
+    ichimokuPriceVsCloud: ichi.priceVsCloud,
+  });
+
   let bbSignal: TechnicalOutput["bbSignal"] = "normal";
   if (bb.bandwidth < 0.03) bbSignal = "squeeze";
   else if (bb.percentB > 0.95) bbSignal = "overextended_up";
   else if (bb.percentB < 0.05) bbSignal = "overextended_down";
 
-  // EMAs
-  const ema9Arr  = emaArray(closes, 9);
-  const ema21Arr = emaArray(closes, 21);
-  const ema50Arr = emaArray(closes, 50);
-  const ema9Val  = ema9Arr[ema9Arr.length - 1]   ?? price;
-  const ema21Val = ema21Arr[ema21Arr.length - 1] ?? price;
-  const ema50Val = ema50Arr[ema50Arr.length - 1] ?? price;
-
-  let emaCrossSignal: TechnicalOutput["emaCrossSignal"] = "neutral";
-  if (ema9Val > ema21Val && ema21Val > ema50Val) emaCrossSignal = "bullish";
-  else if (ema9Val < ema21Val && ema21Val < ema50Val) emaCrossSignal = "bearish";
-
-  // Trend
-  const trend = detectTrend(closes, 20);
-
-  // Volume
-  const volRatio = volumeRatio(volumes, 20);
-  const volumeSignal: TechnicalOutput["volumeSignal"] =
-    volRatio > 1.5 ? "high" : volRatio < 0.6 ? "low" : "normal";
-
-  // ATR
-  const atrVal = atr(highs, lows, closes, 14);
-  const atrPct = price > 0 ? +(atrVal / price * 100).toFixed(2) : 2;
-
-  // Support / Resistance
-  const sr = supportResistance(highs, lows, price);
-
-  // Composite technical score
-  let techScore = 0;
-  // RSI contribution
-  if (rsiVal < 30) techScore += 25;
-  else if (rsiVal < 40) techScore += 10;
-  else if (rsiVal > 70) techScore -= 25;
-  else if (rsiVal > 60) techScore -= 10;
-  // MACD
-  if (macdCross === "bullish") techScore += 20;
-  else if (macdCross === "bearish") techScore -= 20;
-  if (macdResult.histogram > 0) techScore += 10;
-  else if (macdResult.histogram < 0) techScore -= 10;
-  // BB
-  if (bb.percentB < 0.2) techScore += 15;
-  else if (bb.percentB > 0.8) techScore -= 15;
-  // EMA
-  if (emaCrossSignal === "bullish") techScore += 20;
-  else if (emaCrossSignal === "bearish") techScore -= 20;
-  // Trend
-  if (trend === "uptrend") techScore += 10;
-  else if (trend === "downtrend") techScore -= 10;
-  // Volume confirmation
-  if (volRatio > 1.5 && md.changePercent > 0) techScore += 10;
-  else if (volRatio > 1.5 && md.changePercent < 0) techScore -= 10;
-
   return {
-    rsi: rsiVal, rsiSignal,
-    macdCross, macdHistogram: macdResult.histogram,
-    bbPercentB: bb.percentB, bbSignal,
-    trend, ema9: +ema9Val.toFixed(2), ema21: +ema21Val.toFixed(2), ema50: +ema50Val.toFixed(2),
-    emaCrossSignal, volumeRatio: volRatio, volumeSignal,
+    rsi: rsiVal, rsiSignal: rsiVal < 35 ? "oversold" : rsiVal > 65 ? "overbought" : "neutral",
+    macdCross: macdRes.crossover, macdHistogram: macdRes.histogram,
+    bbPercentB: bb.percentB, bbSignal, trend,
+    ema9: +ema9.toFixed(2), ema21: +ema21.toFixed(2), ema50: +ema50.toFixed(2), emaCrossSignal,
+    volumeRatio: volR, volumeSignal: volR > 1.5 ? "high" : volR < 0.6 ? "low" : "normal",
     atr: +atrVal.toFixed(4), atrPct,
     support: sr.nearestSupport, resistance: sr.nearestResistance,
     distToSupport: sr.distanceToSupport, distToResistance: sr.distanceToResistance,
-    technicalScore: Math.max(-100, Math.min(100, techScore)),
+    stochK: stoch.k, stochD: stoch.d, stochSignal: stoch.signal,
+    williamsR: willR.value, williamsSignal: willR.signal,
+    obvTrend: obvRes.trend, vwapRelation: price >= vwapVal ? "above" : "below",
+    ichimokuCloud: ichi.priceVsCloud,
+    candlePattern: candles.detected.join(", ") || "none",
+    candleScore: candles.patternScore, technicalScore: score,
   };
 }
 
-async function runStrategyAgent(
-  symbol: string, md: MarketData,
-  research: ResearchOutput, sentiment: SentimentOutput,
-  techs: Omit<TechnicalOutput, "reasoning">
-): Promise<TechnicalOutput> {
-  const system = `You are the STRATEGY AGENT for an elite quantitative hedge fund.
-Your job: interpret technical indicators and determine the trading signal.
-You have deep expertise in RSI, MACD, Bollinger Bands, EMAs, volume analysis, and market microstructure.
+// ─── Agent 1: Research ────────────────────────────────────────
 
-OUTPUT: respond ONLY with a valid JSON object — no markdown, no preamble.
-Schema: same as input technicals but add "reasoning" field (max 300 chars).
-Just return the same numbers plus your reasoning — do NOT change the numeric values.`;
+async function runResearch(symbol: string, md: MarketData): Promise<ResearchOutput> {
+  const newsBlob = md.news.slice(0, 8).map((n, i) => `[${i+1}] (${n.created_at.slice(0,10)}) ${n.headline}`).join("\n") || "No news.";
+  const priceHist = md.bars.closes.slice(-10).map(c => `$${c.toFixed(2)}`).join(", ");
+  return llmJSON<ResearchOutput>(
+    `You are the RESEARCH AGENT of an elite hedge fund. Analyze macro, sector, and fundamental catalysts.
+Respond ONLY with JSON: { macroRegime, sectorStrength, earningsRisk, catalysts[], headwinds[], macroScore(-100 to 100), reasoning(max 250 chars) }`,
+    `SYMBOL: ${symbol} @ $${md.price.toFixed(2)} (${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}%)
+10-DAY HISTORY: ${priceHist}
+52W HIGH/LOW: $${Math.max(...md.bars.closes).toFixed(2)} / $${Math.min(...md.bars.closes).toFixed(2)}
+VOLUME: ${(md.volume/1e6).toFixed(2)}M | SOURCE: ${md.source}
+RECENT NEWS:\n${newsBlob}
+MACRO: Fed hawkish, USD strong, tech sector leading.`, 400
+  );
+}
 
-  const user = `SYMBOL: ${symbol} @ $${md.price.toFixed(2)}
+// ─── Agent 2: Sentiment ───────────────────────────────────────
 
-TECHNICAL INDICATORS:
-- RSI(14): ${techs.rsi} → ${techs.rsiSignal.toUpperCase()}
-- MACD: histogram=${techs.macdHistogram}, crossover=${techs.macdCross.toUpperCase()}
-- Bollinger %B: ${(techs.bbPercentB * 100).toFixed(1)}% → ${techs.bbSignal.toUpperCase()}
-- EMA 9/21/50: $${techs.ema9}/$${techs.ema21}/$${techs.ema50} → ${techs.emaCrossSignal.toUpperCase()} alignment
-- Trend (20-day): ${techs.trend.toUpperCase()}
-- Volume ratio vs 20d avg: ${techs.volumeRatio}x → ${techs.volumeSignal.toUpperCase()}
-- ATR(14): $${techs.atr} (${techs.atrPct}% of price) — used for stop sizing
-- Support: $${techs.support} (${techs.distToSupport}% away)
-- Resistance: $${techs.resistance} (${techs.distToResistance}% away)
-- Composite Technical Score: ${techs.technicalScore}/100
+async function runSentiment(symbol: string, md: MarketData, research: ResearchOutput): Promise<SentimentOutput> {
+  const newsBlob = md.news.map((n, i) => `[${i+1}] ${n.headline}\n    ${n.summary || ""}`).join("\n\n") || "No news.";
+  return llmJSON<SentimentOutput>(
+    `You are the SENTIMENT AGENT of an elite hedge fund. Score news and market sentiment.
+Respond ONLY with JSON: { overallSentiment, sentimentScore(-100 to 100), newsSignal, fearGreedProxy, keyHeadlines[], reasoning(max 250 chars) }`,
+    `SYMBOL: ${symbol} @ $${md.price.toFixed(2)} (${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}%)
+MACRO: ${research.macroRegime} | Score: ${research.macroScore}
+NEWS:\n${newsBlob}`, 400
+  );
+}
 
-UPSTREAM CONTEXT:
-- Macro Regime: ${research.macroRegime} (score: ${research.macroScore})
-- Sentiment: ${sentiment.overallSentiment} (score: ${sentiment.sentimentScore})
-- Earnings Risk: ${research.earningsRisk}
+// ─── Agent 3: Strategy ────────────────────────────────────────
 
-Add your expert "reasoning" for the technical picture (max 300 chars).`;
-
-  const result = await llmJSON<TechnicalOutput>(system, user, 300);
-  // Preserve computed values, only take reasoning
+async function runStrategy(symbol: string, md: MarketData, research: ResearchOutput, sentiment: SentimentOutput, techs: Omit<TechnicalOutput, "reasoning">): Promise<TechnicalOutput> {
+  const result = await llmJSON<{ reasoning: string }>(
+    `You are the STRATEGY AGENT (quantitative technician). Interpret indicators and add expert reasoning.
+Respond ONLY with JSON: { reasoning: "string max 300 chars" }`,
+    `SYMBOL: ${symbol} @ $${md.price.toFixed(2)}
+RSI: ${techs.rsi} (${techs.rsiSignal}) | MACD: ${techs.macdCross} histogram=${techs.macdHistogram}
+BB %B: ${(techs.bbPercentB*100).toFixed(0)}% (${techs.bbSignal}) | EMA: ${techs.emaCrossSignal}
+Stoch %K/${techs.stochD}: ${techs.stochK}/${techs.stochD} (${techs.stochSignal})
+Williams %R: ${techs.williamsR} | OBV: ${techs.obvTrend} | VWAP: price ${techs.vwapRelation} VWAP
+Ichimoku: ${techs.ichimokuCloud} cloud | ATR: ${techs.atrPct}%
+Candles: ${techs.candlePattern} (score ${techs.candleScore})
+COMPOSITE SCORE: ${techs.technicalScore}/100
+MACRO: ${research.macroRegime} (${research.macroScore}) | SENTIMENT: ${sentiment.overallSentiment} (${sentiment.sentimentScore})`, 250
+  );
   return { ...techs, reasoning: result.reasoning ?? "Technical analysis complete." };
 }
 
-// ─── AGENT 4: TRADER (Decision + Execution) ───────────────────────────────────
+// ─── Agent 4: Trader ─────────────────────────────────────────
 
-async function runTraderAgent(
+async function runTrader(
   agent: typeof agentsTable.$inferSelect,
   symbol: string, md: MarketData,
   research: ResearchOutput, sentiment: SentimentOutput,
   technical: TechnicalOutput,
   existingPos: { qty: number; avgCost: number } | null,
-  maxPos: number,
+  maxQty: number, compositeScore: number,
 ): Promise<TraderDecision> {
-  const maxQty = Math.max(1, Math.floor(maxPos / md.price));
-  const compositeScore = Math.round(
-    research.macroScore * 0.25 +
-    sentiment.sentimentScore * 0.25 +
-    technical.technicalScore * 0.50
+  const result = await llmJSON<TraderDecision>(
+    `You are the HEAD TRADER of a world-class hedge fund. Make the final trading decision.
+HARD RULES:
+- "buy" only if NO existing position. "sell" only if HAVE position. Otherwise "hold".
+- Minimum confidence to act: 65. Below that: "hold".
+- R:R must be ≥ 2.0 before any buy.
+- stopLossPct: 1.5–4.0. takeProfitPct: ≥ 2× stopLossPct.
+- positionSizePct: 30–100 (Kelly-based % of max allocation).
+Respond ONLY with JSON: { action, quantity(1-${maxQty}), confidence(0-100), stopLossPct, takeProfitPct, riskRewardRatio, positionSizePct, reasoning(max 350 chars), conviction }`,
+    `═ INTELLIGENCE BRIEF ═
+${symbol} @ $${md.price.toFixed(2)} | Change: ${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}%
+Existing pos: ${existingPos ? `${existingPos.qty}sh @ $${existingPos.avgCost.toFixed(2)} (${((md.price-existingPos.avgCost)/existingPos.avgCost*100).toFixed(1)}% P&L)` : "NONE"}
+Strategy: ${agent.strategy.toUpperCase()} | Risk: ${agent.riskLevel.toUpperCase()}
+Max shares: ${maxQty}
+
+RESEARCH: ${research.macroRegime} | Score: ${research.macroScore} | Earnings: ${research.earningsRisk}
+→ ${research.catalysts.join("; ")} | ⚠ ${research.headwinds.join("; ")}
+SENTIMENT: ${sentiment.overallSentiment} (${sentiment.sentimentScore}) | ${sentiment.fearGreedProxy}
+→ ${sentiment.keyHeadlines.slice(0,2).join(" | ")}
+TECHNICAL: Score ${technical.technicalScore} | RSI ${technical.rsi} | MACD ${technical.macdCross}
+BB ${(technical.bbPercentB*100).toFixed(0)}% | EMA ${technical.emaCrossSignal} | ${technical.candlePattern}
+Stoch ${technical.stochK} | Williams ${technical.williamsR} | OBV ${technical.obvTrend}
+ATR ${technical.atrPct}% | Support $${technical.support} | Resistance $${technical.resistance}
+COMPOSITE: ${compositeScore}/100 — ${compositeScore > 40 ? "STRONG BULL" : compositeScore > 20 ? "MILD BULL" : compositeScore < -40 ? "STRONG BEAR" : compositeScore < -20 ? "MILD BEAR" : "NEUTRAL"}`, 500
   );
 
-  const system = `You are the HEAD TRADER of an elite quantitative hedge fund — think Ken Griffin, Jim Simons, Steve Cohen combined.
-You have the final say on every trade. You synthesize macro, sentiment, AND technicals into precise execution decisions.
-
-RULES (hard constraints):
-- ONLY "buy" if there is NO existing position.
-- ONLY "sell" if there IS an existing position.
-- "hold" otherwise.
-- Minimum confidence to trade: 60. Below that, always "hold".
-- Risk/reward must be ≥ 1.5 before any buy.
-- stopLossPct: 1.5–4.0 (use ATR-based sizing, not arbitrary).
-- takeProfitPct: must be ≥ 1.5× stopLossPct.
-- positionSizePct: 25–100 (% of max position to deploy, Kelly-inspired).
-- conviction "high" = 80+ confidence, "medium" = 65–79, "low" = 60–64.
-
-OUTPUT: respond ONLY with a valid JSON object — no markdown, no preamble.
-Schema:
-{
-  "action": "buy" | "sell" | "hold",
-  "quantity": number,
-  "confidence": number,
-  "stopLossPct": number,
-  "takeProfitPct": number,
-  "riskRewardRatio": number,
-  "positionSizePct": number,
-  "reasoning": "string",     // max 400 chars — cite specific signals
-  "conviction": "high" | "medium" | "low"
-}`;
-
-  const user = `═══ FULL INTELLIGENCE BRIEF ═══
-
-SYMBOL: ${symbol}
-PRICE: $${md.price.toFixed(2)} | CHANGE: ${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}%
-EXISTING POSITION: ${existingPos ? `${existingPos.qty} shares @ avg $${existingPos.avgCost.toFixed(2)} (unrealized P&L: ${((md.price - existingPos.avgCost) / existingPos.avgCost * 100).toFixed(2)}%)` : "NONE"}
-MAX POSITION: $${maxPos.toFixed(0)} (max ${maxQty} shares) | STRATEGY: ${agent.strategy.toUpperCase()} | RISK: ${agent.riskLevel.toUpperCase()}
-
-═══ RESEARCH AGENT ═══
-Macro Regime: ${research.macroRegime.toUpperCase()} | Sector: ${research.sectorStrength} | Earnings Risk: ${research.earningsRisk}
-Macro Score: ${research.macroScore}/100
-Catalysts: ${research.catalysts.join("; ") || "none"}
-Headwinds: ${research.headwinds.join("; ") || "none"}
-Analysis: ${research.reasoning}
-
-═══ SENTIMENT AGENT ═══
-Sentiment: ${sentiment.overallSentiment.toUpperCase()} (${sentiment.sentimentScore}/100)
-News Signal: ${sentiment.newsSignal.toUpperCase()} | Fear/Greed: ${sentiment.fearGreedProxy.toUpperCase()}
-Key Headlines: ${sentiment.keyHeadlines.join(" | ") || "none"}
-Analysis: ${sentiment.reasoning}
-
-═══ STRATEGY AGENT (TECHNICALS) ═══
-RSI(14): ${technical.rsi} → ${technical.rsiSignal.toUpperCase()}
-MACD: ${technical.macdCross.toUpperCase()} crossover | histogram=${technical.macdHistogram}
-Bollinger %B: ${(technical.bbPercentB * 100).toFixed(1)}% → ${technical.bbSignal.toUpperCase()}
-EMA 9/21/50: ${technical.emaCrossSignal.toUpperCase()} alignment ($${technical.ema9}/$${technical.ema21}/$${technical.ema50})
-Trend: ${technical.trend.toUpperCase()} | Volume: ${technical.volumeRatio}x (${technical.volumeSignal})
-ATR: $${technical.atr} (${technical.atrPct}%) | Support: $${technical.support} | Resistance: $${technical.resistance}
-Technical Score: ${technical.technicalScore}/100
-Analysis: ${technical.reasoning}
-
-═══ COMPOSITE SCORE ═══
-OVERALL SIGNAL: ${compositeScore}/100 (${compositeScore > 30 ? "BULLISH" : compositeScore < -30 ? "BEARISH" : "NEUTRAL"})
-Weights: Technical 50% | Research 25% | Sentiment 25%
-
-Make your final trading decision. Be precise. Cite the strongest signals in your reasoning.`;
-
-  const result = await llmJSON<TraderDecision>(system, user, 500);
-
-  // Hard guardrails
-  if (![  "buy", "sell", "hold"].includes(result.action)) result.action = "hold";
+  // Guardrails
+  if (!["buy","sell","hold"].includes(result.action)) result.action = "hold";
   if (result.action === "buy" && existingPos) result.action = "hold";
   if (result.action === "sell" && !existingPos) result.action = "hold";
-  if ((result.confidence ?? 0) < 60) result.action = "hold";
-
-  result.quantity    = Math.max(1, Math.min(maxQty, Math.round(result.quantity) || 1));
-  result.confidence  = Math.max(0, Math.min(100, result.confidence ?? 50));
-  result.stopLossPct = Math.max(1.0, Math.min(5.0, result.stopLossPct ?? technical.atrPct * 1.5));
-  result.takeProfitPct = Math.max(result.stopLossPct * 1.5, result.takeProfitPct ?? result.stopLossPct * 2.5);
+  if ((result.confidence ?? 0) < 65) result.action = "hold";
+  result.quantity = Math.max(1, Math.min(maxQty, Math.round(result.quantity) || 1));
+  result.confidence = Math.max(0, Math.min(100, result.confidence ?? 50));
+  result.stopLossPct = Math.max(1.5, Math.min(4.0, result.stopLossPct ?? technical.atrPct * 1.5));
+  result.takeProfitPct = Math.max(result.stopLossPct * 2.0, result.takeProfitPct ?? result.stopLossPct * 2.5);
   result.riskRewardRatio = +(result.takeProfitPct / result.stopLossPct).toFixed(2);
-  result.positionSizePct = Math.max(25, Math.min(100, result.positionSizePct ?? 50));
-  result.reasoning   = String(result.reasoning ?? "").slice(0, 400);
-
-  // Apply position sizing
-  const sizedQty = Math.max(1, Math.round(result.quantity * result.positionSizePct / 100));
-  result.quantity = sizedQty;
-
+  result.positionSizePct = Math.max(30, Math.min(100, result.positionSizePct ?? 50));
+  result.quantity = Math.max(1, Math.round(result.quantity * result.positionSizePct / 100));
   return result;
 }
 
-// ─── Order execution ──────────────────────────────────────────────────────────
+// ─── Order execution ──────────────────────────────────────────
 
 async function placeOrder(
-  agent: typeof agentsTable.$inferSelect,
-  symbol: string, side: "buy" | "sell",
-  quantity: number, price: number,
-  stopLossPct: number, takeProfitPct: number,
-  reason: string,
+  agent: typeof agentsTable.$inferSelect, symbol: string, side: "buy" | "sell",
+  quantity: number, price: number, reason: string,
 ): Promise<{ orderId: number; alpacaId?: string; filledPrice: number }> {
   let alpacaId: string | undefined;
   let filledPrice = price;
-
   if (alpaca.isConfigured()) {
-    const alpacaOrder = await alpaca.placeOrder({
-      symbol, qty: quantity, side, type: "market", time_in_force: "day",
-    });
-    alpacaId = alpacaOrder.id;
-    if (alpacaOrder.filled_avg_price) filledPrice = parseFloat(alpacaOrder.filled_avg_price);
-    logger.info({ alpacaId, symbol, side, quantity, stopLossPct, takeProfitPct }, "Placed real Alpaca order");
+    const ao = await alpaca.placeOrder({ symbol, qty: quantity, side, type: "market", time_in_force: "day" });
+    alpacaId = ao.id;
+    if (ao.filled_avg_price) filledPrice = parseFloat(ao.filled_avg_price);
   }
-
   const [order] = await db.insert(ordersTable).values({
     symbol, assetType: "stock", side, orderType: "market",
     quantity: quantity.toString(), filledPrice: filledPrice.toString(),
     status: "filled", agentId: agent.id, agentName: agent.name,
     reason: reason.slice(0, 500), filledAt: new Date(),
   }).returning();
-
   return { orderId: order.id, alpacaId, filledPrice };
 }
 
 async function updateStats(agent: typeof agentsTable.$inferSelect, traded: boolean, pnl: number, isWin: boolean) {
-  if (!traded) {
-    await db.update(agentsTable).set({ lastRunAt: new Date() }).where(eq(agentsTable.id, agent.id));
-    return;
-  }
+  if (!traded) { await db.update(agentsTable).set({ lastRunAt: new Date() }).where(eq(agentsTable.id, agent.id)); return; }
   const newTrades = agent.totalTrades + 1;
-  const oldWins   = Math.round((parseFloat(agent.winRate) / 100) * agent.totalTrades);
-  const newWins   = oldWins + (isWin ? 1 : 0);
-  const newWinRate = newTrades > 0 ? (newWins / newTrades) * 100 : 0;
-  const newPnl    = parseFloat(agent.totalPnl) + pnl;
+  const oldWins = Math.round((parseFloat(agent.winRate) / 100) * agent.totalTrades);
+  const newWins = oldWins + (isWin ? 1 : 0);
+  const newPnl = parseFloat(agent.totalPnl) + pnl;
   await db.update(agentsTable).set({
-    totalTrades: newTrades, winRate: newWinRate.toFixed(2),
+    totalTrades: newTrades, winRate: ((newWins / newTrades) * 100).toFixed(2),
     totalPnl: newPnl.toFixed(4), lastRunAt: new Date(),
   }).where(eq(agentsTable.id, agent.id));
 }
 
-// ─── Market Hours Guard ───────────────────────────────────────────────────────
-
-function isMarketHours(): boolean {
-  const now = new Date();
-  // NYSE: 9:30–16:00 ET (UTC-4 in summer, UTC-5 in winter)
-  const etOffset = isDST(now) ? -4 : -5;
-  const etHour = (now.getUTCHours() + 24 + etOffset) % 24;
-  const etMin  = now.getUTCMinutes();
-  const etMins = etHour * 60 + etMin;
-  const day    = now.getUTCDay();
-  // Mon-Fri only
-  if (day === 0 || day === 6) return false;
-  return etMins >= 570 && etMins < 960; // 9:30–16:00
-}
-
-function isDST(date: Date): boolean {
-  const jan = new Date(date.getFullYear(), 0, 1).getTimezoneOffset();
-  const jul = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
-  return date.getTimezoneOffset() < Math.max(jan, jul);
-}
-
-// ─── Main public entry point ──────────────────────────────────────────────────
+// ─── Main entry point ─────────────────────────────────────────
 
 function parseSymbols(val: string): string[] {
   try { return JSON.parse(val); } catch { return []; }
 }
 
-export async function runAgentLogic(
-  agent: typeof agentsTable.$inferSelect
-): Promise<AgentRunResult> {
+export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Promise<AgentRunResult> {
   const symbols = parseSymbols(agent.symbols);
-  if (symbols.length === 0) {
-    return { action: "no_signal", analysis: "No symbols configured.", orderPlaced: null };
-  }
+  if (symbols.length === 0) return { action: "no_signal", analysis: "No symbols configured.", orderPlaced: null };
 
-  // Pick symbol — rotate based on time so we don't always hit the same one
-  const symbol = symbols[Math.floor(Date.now() / 300_000) % symbols.length];
-  const maxPos  = parseFloat(agent.maxPositionSize);
+  // ── 0. Market hours check ────────────────────────────────
+  if (!isMarketOpen()) return { action: "no_signal", analysis: "Market closed.", orderPlaced: null };
+  const minsToClose = minutesToMarketClose();
 
-  // ── Step 1: Fetch all market data ──────────────────────────────────────────
-  let md: MarketData;
-  try {
-    md = await fetchMarketData(symbol);
-  } catch (err: any) {
-    return { action: "error", analysis: `Data fetch failed: ${err.message}`, orderPlaced: null };
-  }
-
-  // ── Step 2: Get existing position ─────────────────────────────────────────
+  // ── 0b. Get existing positions ───────────────────────────
+  const existingPositionSymbols: string[] = [];
   let existingPos: { qty: number; avgCost: number } | null = null;
+
+  // ── 0c. Circuit breaker check ────────────────────────────
+  const recentOrders = await db.select().from(ordersTable)
+    .orderBy(ordersTable.createdAt)
+    .limit(30);
+
+  const stats = computeTradeStats(
+    recentOrders.map(o => ({ filledPrice: o.filledPrice, side: o.side, quantity: o.quantity, agentId: o.agentId }))
+  );
+
+  const breaker = checkCircuitBreaker({
+    dailyPnL: parseFloat(agent.totalPnl),
+    initialCapital: 100000,
+    peakPortfolioValue: 100000 + Math.max(0, parseFloat(agent.totalPnl)),
+    currentPortfolioValue: 100000 + parseFloat(agent.totalPnl),
+    consecutiveLosses: stats.consecutiveLosses,
+    minutesToClose: minsToClose,
+  });
+
+  if (breaker.halt) {
+    return { action: "no_signal", analysis: `Circuit breaker: ${breaker.reason}`, orderPlaced: null,
+             pipeline: { scanGrade: "N/A", compositeScore: 0, confidence: 0, kellyF: 0, circuitBreaker: breaker.reason } };
+  }
+
+  // ── 1. Scanner: find best opportunity ────────────────────
+  const maxPos = parseFloat(agent.maxPositionSize);
+  let scanResult: SymbolScan | null = null;
+  let symbol: string;
+
+  try {
+    scanResult = await findBestOpportunity(symbols, existingPositionSymbols);
+  } catch (e) { logger.warn({ e }, "Scanner failed, using random symbol"); }
+
+  if (scanResult && (scanResult.grade === "A+" || scanResult.grade === "A")) {
+    symbol = scanResult.symbol;
+    logger.info({ symbol, grade: scanResult.grade, score: scanResult.technicalScore }, "Scanner picked symbol");
+  } else {
+    // Fallback: round-robin
+    symbol = symbols[Math.floor(Date.now() / 300_000) % symbols.length];
+    logger.info({ symbol }, "No A/A+ signal, using fallback symbol");
+  }
+
+  // ── 2. Fetch full market data ─────────────────────────────
+  let md: MarketData;
+  try { md = await fetchMarketData(symbol); }
+  catch (err: any) { return { action: "error", analysis: `Data fetch failed: ${err.message}`, orderPlaced: null }; }
+
+  // Existing position check
   if (alpaca.isConfigured()) {
     try {
       const pos = await alpaca.getPosition(symbol);
       existingPos = { qty: parseFloat(pos.qty), avgCost: parseFloat(pos.avg_entry_price) };
-    } catch { /* no position */ }
+    } catch { /* none */ }
   }
 
-  logger.info({ agentId: agent.id, symbol, price: md.price, source: md.source, newsCount: md.news.length }, "Pipeline starting");
+  // ── 3. Run 4-agent LLM pipeline ──────────────────────────
+  const [research, sentiment] = await Promise.all([
+    runResearch(symbol, md).catch(() => ({
+      macroRegime: "neutral" as const, sectorStrength: "neutral" as const,
+      earningsRisk: "low" as const, catalysts: [], headwinds: [], macroScore: 0,
+      reasoning: "Research failed." })),
+    runSentiment(symbol, md, { macroRegime: "neutral", sectorStrength: "neutral",
+      earningsRisk: "low", catalysts: [], headwinds: [], macroScore: 0, reasoning: "" })
+      .catch(() => ({ overallSentiment: "neutral" as const, sentimentScore: 0,
+        newsSignal: "no_news" as const, fearGreedProxy: "neutral" as const,
+        keyHeadlines: [], reasoning: "Sentiment failed." })),
+  ]);
 
-  // ── Step 3: Run 4-agent pipeline ──────────────────────────────────────────
-  let research: ResearchOutput;
-  let sentiment: SentimentOutput;
-  let technical: TechnicalOutput;
-  let trader: TraderDecision;
-
-  try {
-    research  = await runResearchAgent(symbol, md);
-    logger.info({ agentId: agent.id, macroScore: research.macroScore, regime: research.macroRegime }, "Research done");
-  } catch (err: any) {
-    logger.error({ err }, "Research agent failed");
-    research = { macroRegime: "neutral", sectorStrength: "neutral", earningsRisk: "low",
-                 catalysts: [], headwinds: [], macroScore: 0, reasoning: "Research failed." };
-  }
-
-  try {
-    sentiment = await runSentimentAgent(symbol, md, research);
-    logger.info({ agentId: agent.id, sentimentScore: sentiment.sentimentScore, signal: sentiment.newsSignal }, "Sentiment done");
-  } catch (err: any) {
-    logger.error({ err }, "Sentiment agent failed");
-    sentiment = { overallSentiment: "neutral", sentimentScore: 0, newsSignal: "no_news",
-                  fearGreedProxy: "neutral", keyHeadlines: [], reasoning: "Sentiment failed." };
-  }
-
-  try {
-    const rawTechs = computeTechnicals(md);
-    technical = await runStrategyAgent(symbol, md, research, sentiment, rawTechs);
-    logger.info({ agentId: agent.id, techScore: technical.technicalScore, rsi: technical.rsi }, "Strategy done");
-  } catch (err: any) {
-    logger.error({ err }, "Strategy agent failed");
-    const rawTechs = computeTechnicals(md);
-    technical = { ...rawTechs, reasoning: "Strategy analysis failed." };
-  }
-
-  try {
-    trader = await runTraderAgent(agent, symbol, md, research, sentiment, technical, existingPos, maxPos);
-    logger.info({ agentId: agent.id, action: trader.action, confidence: trader.confidence }, "Trader decision");
-  } catch (err: any) {
-    logger.error({ err }, "Trader agent failed");
-    return { action: "error", analysis: `Trader agent failed: ${err.message}`, orderPlaced: null };
-  }
+  const rawTechs = computeTechnicals(md);
+  const technical = await runStrategy(symbol, md, research, sentiment, rawTechs)
+    .catch(() => ({ ...rawTechs, reasoning: "Strategy failed." }));
 
   const compositeScore = Math.round(
     research.macroScore * 0.25 + sentiment.sentimentScore * 0.25 + technical.technicalScore * 0.50
   );
 
-  const pipeline: PipelineResult = { research, sentiment, technical, trader, compositeScore };
+  const maxQty = Math.max(1, Math.floor(maxPos / md.price));
+  const trader = await runTrader(agent, symbol, md, research, sentiment, technical, existingPos, maxQty, compositeScore)
+    .catch(err => ({ action: "hold" as const, quantity: 1, confidence: 0,
+      stopLossPct: 2, takeProfitPct: 4, riskRewardRatio: 2, positionSizePct: 50,
+      reasoning: `Trader failed: ${err.message}`, conviction: "low" as const }));
 
-  const analysis = `[${trader.confidence}% conf | Score: ${compositeScore}] ${trader.reasoning}`;
+  // ── 4. Kelly position sizing ─────────────────────────────
+  const kellyF = kellyFraction(stats.winRate, stats.avgWin, stats.avgLoss);
+  const sizing = computePositionSize(md.price, trader.stopLossPct, maxPos, kellyF);
+  const finalQty = Math.max(1, Math.min(maxQty, sizing.shares, trader.quantity));
 
-  // ── Step 4: Execute ───────────────────────────────────────────────────────
+  // ── 5. Options suggestion (if IV elevated) ───────────────
+  let optionSuggestion: string | undefined;
+  try {
+    // Approximate IV from ATR: annualized ATR ≈ IV
+    const approxIV = (technical.atrPct / 100) * Math.sqrt(252);
+    const ivCtx = analyzeIV(approxIV, [approxIV * 0.8, approxIV * 0.9, approxIV * 1.1, approxIV * 1.2]);
+    if (ivCtx.ivRank > 40) {
+      const optOpp = findBestOptionStrategy(md.price, approxIV, ivCtx,
+        compositeScore > 20 ? "bullish" : compositeScore < -20 ? "bearish" : "neutral");
+      if (optOpp) optionSuggestion = `${optOpp.strategy}: ${optOpp.rationale}`;
+    }
+  } catch { /* optional */ }
+
+  const analysis = `[${trader.confidence}% conf | Score: ${compositeScore} | ${scanResult?.grade ?? "N/A"}] ${trader.reasoning}`;
+
+  const pipeline = {
+    scanGrade: scanResult?.grade ?? "N/A",
+    compositeScore, confidence: trader.confidence, kellyF: +kellyF.toFixed(3),
+    circuitBreaker: breaker.reason,
+    ...(optionSuggestion ? { optionSuggestion } : {}),
+  };
+
+  // ── 6. Execute ───────────────────────────────────────────
   if (trader.action === "buy" && !existingPos) {
-    const stopLoss   = +(md.price * (1 - trader.stopLossPct / 100)).toFixed(2);
-    const takeProfit = +(md.price * (1 + trader.takeProfitPct / 100)).toFixed(2);
+    const levels = computeStopLevels(md.price, technical.atr, "long", 2);
     try {
-      const result = await placeOrder(agent, symbol, "buy", trader.quantity, md.price,
-        trader.stopLossPct, trader.takeProfitPct, analysis);
+      const result = await placeOrder(agent, symbol, "buy", finalQty, md.price, analysis);
       await updateStats(agent, true, 0, false);
       return {
         action: "bought", analysis, pipeline,
-        orderPlaced: { symbol, side: "buy", quantity: trader.quantity,
-          price: result.filledPrice, stopLoss, takeProfit, alpacaId: result.alpacaId },
+        orderPlaced: { symbol, side: "buy", quantity: finalQty, price: result.filledPrice,
+          stopLoss: levels.stopLoss, takeProfit: levels.takeProfit2, alpacaId: result.alpacaId },
       };
     } catch (err: any) {
       return { action: "error", analysis: `${analysis} — Order failed: ${err.message}`, pipeline, orderPlaced: null };
@@ -762,25 +534,22 @@ export async function runAgentLogic(
   }
 
   if (trader.action === "sell" && existingPos) {
-    const qty = Math.min(trader.quantity, existingPos.qty);
-    const stopLoss   = +(md.price * (1 - trader.stopLossPct / 100)).toFixed(2);
-    const takeProfit = +(md.price * (1 + trader.takeProfitPct / 100)).toFixed(2);
+    const qty = Math.min(finalQty, existingPos.qty);
+    const levels = computeStopLevels(existingPos.avgCost, technical.atr, "long", 2);
     try {
-      const result = await placeOrder(agent, symbol, "sell", qty, md.price,
-        trader.stopLossPct, trader.takeProfitPct, analysis);
+      const result = await placeOrder(agent, symbol, "sell", qty, md.price, analysis);
       const pnl = (result.filledPrice - existingPos.avgCost) * qty;
       await updateStats(agent, true, pnl, pnl > 0);
       return {
         action: "sold", analysis, pipeline,
-        orderPlaced: { symbol, side: "sell", quantity: qty,
-          price: result.filledPrice, stopLoss, takeProfit, alpacaId: result.alpacaId },
+        orderPlaced: { symbol, side: "sell", quantity: qty, price: result.filledPrice,
+          stopLoss: levels.stopLoss, takeProfit: levels.takeProfit2, alpacaId: result.alpacaId },
       };
     } catch (err: any) {
       return { action: "error", analysis: `${analysis} — Order failed: ${err.message}`, pipeline, orderPlaced: null };
     }
   }
 
-  // Hold
   await updateStats(agent, false, 0, false);
   return {
     action: trader.action === "hold" ? "held" : "no_signal",
