@@ -239,7 +239,12 @@ async function fetchMarketData(symbol: string): Promise<MarketData> {
 
 // ─── Compute all technicals ───────────────────────────────────
 
-function computeTechnicals(md: MarketData): Omit<TechnicalOutput, "reasoning"> {
+type RawTechOutput = Omit<TechnicalOutput,
+  "reasoning" | "rsiDivergence" | "trendStrength" |
+  "marketStructure" | "setupQuality" | "entryType" |
+  "multiTimeframeAlign" | "keyLevel" | "keyLevelType">;
+
+function computeTechnicals(md: MarketData): RawTechOutput {
   const { closes, highs, lows, volumes, opens } = md.bars;
   const price = md.price;
 
@@ -292,7 +297,7 @@ function computeTechnicals(md: MarketData): Omit<TechnicalOutput, "reasoning"> {
     ichimokuCloud: ichi.priceVsCloud,
     candlePattern: candles.detected.join(", ") || "none",
     candleScore: candles.patternScore, technicalScore: score,
-  };
+  } satisfies RawTechOutput;
 }
 
 // ─── Agent 1: RESEARCH — Goldman Sachs Equity Research level ──
@@ -819,8 +824,11 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     .orderBy(ordersTable.createdAt)
     .limit(30);
 
+  type OrderRow = typeof recentOrders[number];
   const stats = computeTradeStats(
-    recentOrders.map(o => ({ filledPrice: o.filledPrice, side: o.side, quantity: o.quantity, agentId: o.agentId }))
+    recentOrders.map((o: OrderRow) => ({
+      filledPrice: o.filledPrice, side: o.side, quantity: o.quantity, agentId: o.agentId
+    }))
   );
 
   const breaker = checkCircuitBreaker({
@@ -891,8 +899,18 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
   const sentiment = await runSentiment(symbol, md, research).catch(() => fallbackSentiment);
 
   const rawTechs = computeTechnicals(md);
+
+  const fallbackTechnical: TechnicalOutput = {
+    ...rawTechs,
+    rsiDivergence: "none", trendStrength: "weak",
+    marketStructure: "range_bound", setupQuality: "C",
+    entryType: "none", multiTimeframeAlign: "neutral",
+    keyLevel: rawTechs.support, keyLevelType: "support",
+    reasoning: "Strategy failed.",
+  };
+
   const technical = await runStrategy(symbol, md, research, sentiment, rawTechs)
-    .catch(() => ({ ...rawTechs, reasoning: "Strategy failed." }));
+    .catch(() => fallbackTechnical);
 
   const compositeScore = Math.round(
     research.macroScore * 0.25 + sentiment.sentimentScore * 0.25 + technical.technicalScore * 0.50
@@ -900,9 +918,14 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
 
   const maxQty = Math.max(1, Math.floor(maxPos / md.price));
   const trader = await runTrader(agent, symbol, md, research, sentiment, technical, existingPos, maxQty, compositeScore)
-    .catch(err => ({ action: "hold" as const, quantity: 1, confidence: 0,
+    .catch(err => ({
+      action: "hold" as const, quantity: 1, confidence: 0,
       stopLossPct: 2, takeProfitPct: 4, riskRewardRatio: 2, positionSizePct: 50,
-      reasoning: `Trader failed: ${err.message}`, conviction: "low" as const }));
+      entryTechnique: "market_now" as const, scalingPlan: "N/A", exitPlan: "N/A",
+      partialProfitAt: [], trailingStopPct: 1.5, timeStopHours: 6,
+      worstCaseScenario: "Agent error",
+      reasoning: `Trader failed: ${(err as Error).message}`, conviction: "low" as const,
+    }));
 
   // ── 4. Kelly position sizing ─────────────────────────────
   const kellyF = kellyFraction(stats.winRate, stats.avgWin, stats.avgLoss);
