@@ -147,3 +147,61 @@ export function getSnapshot(symbol: string) {
 export function isConfigured() {
   return !!(process.env.ALPACA_API_KEY && process.env.ALPACA_API_SECRET);
 }
+
+// ─── Historical Bars ──────────────────────────────────────────────────────────
+
+export interface AlpacaBar {
+  t: string;  // ISO timestamp
+  o: number;  // open
+  h: number;  // high
+  l: number;  // low
+  c: number;  // close
+  v: number;  // volume
+}
+
+export interface BarsResponse {
+  bars: AlpacaBar[];
+  symbol: string;
+  next_page_token: string | null;
+}
+
+/** Fetch up to `limit` daily bars for a symbol */
+export function getDailyBars(symbol: string, limit = 60): Promise<AlpacaBar[]> {
+  const url = `${DATA_URL}/stocks/${symbol.toUpperCase()}/bars?timeframe=1Day&limit=${limit}&feed=iex&sort=asc`;
+  return alpacaFetch<BarsResponse>(url).then(r => r.bars ?? []);
+}
+
+/** Fetch intraday bars (5m) for same-day analysis */
+export function getIntradayBars(symbol: string, limit = 78): Promise<AlpacaBar[]> {
+  const url = `${DATA_URL}/stocks/${symbol.toUpperCase()}/bars?timeframe=5Min&limit=${limit}&feed=iex&sort=asc`;
+  return alpacaFetch<BarsResponse>(url).then(r => r.bars ?? []);
+}
+
+// ─── News / Sentiment ────────────────────────────────────────────────────────
+
+export interface AlpacaNewsArticle {
+  id: number;
+  headline: string;
+  summary: string;
+  author: string;
+  created_at: string;
+  updated_at: string;
+  url: string;
+  content: string;
+  symbols: string[];
+  source: string;
+}
+
+/** Fetch latest N news articles for a symbol */
+export async function getNews(symbol: string, limit = 10): Promise<AlpacaNewsArticle[]> {
+  const url = `https://data.alpaca.markets/v1beta1/news?symbols=${symbol.toUpperCase()}&limit=${limit}&sort=desc`;
+  try {
+    const res = await fetch(url, { headers: headers() });
+    if (!res.ok) return [];
+    const data = await res.json() as { news: AlpacaNewsArticle[] };
+    return data.news ?? [];
+  } catch {
+    return [];
+  }
+}
+
