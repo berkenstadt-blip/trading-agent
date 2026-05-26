@@ -7,7 +7,7 @@
  *
  *  0. SCANNER        — scan all symbols, pick only A+ / A grade
  *  1. RESEARCH AGENT — macro, sector, catalysts, earnings risk
- *  2. SENTIMENT AGENT — news scoring, fear/greed, headlines
+ *  2. SENTIMENT AGENT — news + Reddit WSB + StockTwits + forums
  *  3. STRATEGY AGENT — 15+ indicators, confluence, regime
  *  4. TRADER AGENT   — final decision, Kelly sizing, R:R gate
  *  5. RISK MANAGER   — circuit breaker, portfolio heat, stops
@@ -36,6 +36,7 @@ import {
 } from "./risk-manager.js";
 
 import { findBestOpportunity, SymbolScan } from "./scanner.js";
+import { getSocialSentiment, SocialSentimentResult } from "./social-sentiment.js";
 
 import {
   blackScholes, analyzeIV, findBestOptionStrategy, IVContext,
@@ -277,13 +278,32 @@ MACRO: Fed hawkish, USD strong, tech sector leading.`, 400
 // ─── Agent 2: Sentiment ───────────────────────────────────────
 
 async function runSentiment(symbol: string, md: MarketData, research: ResearchOutput): Promise<SentimentOutput> {
-  const newsBlob = md.news.map((n, i) => `[${i+1}] ${n.headline}\n    ${n.summary || ""}`).join("\n\n") || "No news.";
+  // Fetch real social data in parallel with news
+  const [socialData, newsBlob] = await Promise.all([
+    getSocialSentiment(symbol).catch(() => null as SocialSentimentResult | null),
+    Promise.resolve(md.news.map((n, i) => `[${i+1}] ${n.headline}\n    ${n.summary || ""}`).join("\n\n") || "No news."),
+  ]);
+
+  const socialContext = socialData ? `
+SOCIAL MEDIA (REAL DATA):
+- Reddit: ${socialData.redditBullCount} bullish / ${socialData.redditBearCount} bearish posts
+- Reddit Score: ${socialData.redditScore}/100 | WSB Trending: ${socialData.isTrendingWSB ? "YES 🔥" : "no"}
+- StockTwits: ${socialData.stocktwitsBullPct}% bull / ${socialData.stocktwitsBearPct}% bear (${socialData.stocktwitsMessageCount} msgs)
+- Mention velocity: ${socialData.mentionVelocity.toUpperCase()} (${socialData.mentionCount} total)
+- Social signal: ${socialData.socialSignal.toUpperCase()} (score ${socialData.overallSocialScore})
+TOP REDDIT/FORUM POSTS:
+${socialData.topRedditPosts.slice(0, 4).map((p, i) => `[${i+1}] ${p}`).join("\n")}
+BULL THESIS FROM FORUMS: ${socialData.bullThesis.slice(0, 2).join(" | ") || "none"}
+BEAR THESIS FROM FORUMS: ${socialData.bearThesis.slice(0, 2).join(" | ") || "none"}` : "";
+
   return llmJSON<SentimentOutput>(
-    `You are the SENTIMENT AGENT of an elite hedge fund. Score news and market sentiment.
-Respond ONLY with JSON: { overallSentiment, sentimentScore(-100 to 100), newsSignal, fearGreedProxy, keyHeadlines[], reasoning(max 250 chars) }`,
+    `You are the SENTIMENT AGENT of an elite hedge fund. You have access to REAL social media data from Reddit, StockTwits, and news. Your job: synthesize all signals into a precise sentiment score.
+Respond ONLY with JSON: { overallSentiment, sentimentScore(-100 to 100), newsSignal, fearGreedProxy, keyHeadlines[], reasoning(max 300 chars) }
+IMPORTANT: Weight social/forum signals heavily — they often lead price action.`,
     `SYMBOL: ${symbol} @ $${md.price.toFixed(2)} (${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}%)
 MACRO: ${research.macroRegime} | Score: ${research.macroScore}
-NEWS:\n${newsBlob}`, 400
+${socialContext}
+ALPACA NEWS:\n${newsBlob}`, 450
   );
 }
 
