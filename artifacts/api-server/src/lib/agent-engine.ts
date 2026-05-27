@@ -39,7 +39,7 @@ import { findBestOpportunity, SymbolScan } from "./scanner.js";
 import { getSocialSentiment, SocialSentimentResult } from "./social-sentiment.js";
 
 import {
-  blackScholes, analyzeIV, findBestOptionStrategy, IVContext,
+  blackScholes, analyzeIV, findBestOptionStrategy, IVContext, OptionOpportunity,
 } from "./options-engine.js";
 
 // ─── OpenRouter client ────────────────────────────────────────
@@ -70,16 +70,22 @@ async function llmJSON<T>(system: string, user: string, maxTokens = 600): Promis
 // ─── Types ────────────────────────────────────────────────────
 
 export interface AgentRunResult {
-  action: "bought" | "sold" | "held" | "no_signal" | "error";
+  action: "bought" | "sold" | "held" | "no_signal" | "error" | "option_placed";
   analysis: string;
   orderPlaced: {
     symbol: string; side: "buy" | "sell"; quantity: number; price: number;
     stopLoss: number; takeProfit: number; alpacaId?: string;
   } | null;
+  optionOrderPlaced?: {
+    symbol: string; optionSymbol: string; strategy: string;
+    optionType: "call" | "put"; strike: number; expDays: number;
+    contracts: number; premium: number; alpacaId?: string;
+  };
   pipeline?: {
     scanGrade: string; compositeScore: number;
     confidence: number; kellyF: number;
     circuitBreaker: string; optionSuggestion?: string;
+    ivRank?: number; ivRegime?: string;
   };
 }
 
@@ -112,6 +118,8 @@ interface ResearchOutput {
   moatStrength: "wide" | "narrow" | "none" | "unknown";
   priceTarget: number | null;       // analyst consensus price target (if inferrable)
   updownside: number | null;        // % upside to price target
+  volatilityOutlook: "expanding" | "contracting" | "stable"; // NEW: expected IV direction
+  optionsBias: "sell_premium" | "buy_options" | "neutral";   // NEW: premium seller vs buyer
   reasoning: string;
 }
 
@@ -172,6 +180,9 @@ interface TraderDecision {
   worstCaseScenario: string;       // what if it goes wrong?
   reasoning: string;
   conviction: "high" | "medium" | "low";
+  // ── Options decision ──
+  optionsPlay: "execute" | "skip";  // should we execute the options strategy?
+  optionsRationale: string;         // why execute or skip options
 }
 
 // ─── Market data fetcher ──────────────────────────────────────
@@ -330,6 +341,9 @@ FRAMEWORKS TO APPLY:
 5. EVENT CALENDAR: earnings date (estimate if unknown), FOMC, CPI, PPI, employment data, regulatory events
 6. COMPETITIVE MOAT: wide moat = pricing power, network effects, switching costs; narrow = commodity business
 7. CATALYST IDENTIFICATION: what specific events could move this 10%+ in next 30 days
+8. VOLATILITY OUTLOOK: is IV likely expanding (pre-earnings, uncertainty) or contracting (post-event, stability)? This drives the options bias.
+   - volatilityOutlook: expanding → buy options (cheap before IV spike); contracting → sell premium (IV crush opportunity)
+   - optionsBias: sell_premium (IV rank high, post-catalyst), buy_options (low IV, catalyst imminent), neutral
 
 OUTPUT: respond ONLY with valid JSON matching this exact schema — no markdown, no commentary:
 {
@@ -352,6 +366,8 @@ OUTPUT: respond ONLY with valid JSON matching this exact schema — no markdown,
   "moatStrength": "wide"|"narrow"|"none"|"unknown",
   "priceTarget": number or null,
   "updownside": number or null (% upside/downside to target),
+  "volatilityOutlook": "expanding"|"contracting"|"stable",
+  "optionsBias": "sell_premium"|"buy_options"|"neutral",
   "reasoning": "string — 1 paragraph max 400 chars, cite specific signals"
 }
 
@@ -605,12 +621,17 @@ async function runTrader(
   technical: TechnicalOutput,
   existingPos: { qty: number; avgCost: number } | null,
   maxQty: number, compositeScore: number,
+  ivCtx: IVContext,
+  optOpp: OptionOpportunity | null,
 ): Promise<TraderDecision> {
 
   // Compute unrealized P&L context for existing position
   const posContext = existingPos
     ? `EXISTING LONG: ${existingPos.qty} shares @ $${existingPos.avgCost.toFixed(2)} | Current P&L: ${((md.price-existingPos.avgCost)/existingPos.avgCost*100).toFixed(2)}% ($${((md.price-existingPos.avgCost)*existingPos.qty).toFixed(2)})`
     : "NO EXISTING POSITION — evaluating entry";
+
+  // Derive approxIV locally for use in prompt (consistent with outer scope)
+  const approxIV = (technical.atrPct / 100) * Math.sqrt(252);
 
   // Profit levels based on ATR
   const atr = technical.atr;
@@ -677,9 +698,11 @@ OUTPUT: respond ONLY with valid JSON:
   "partialProfitAt": [price1, price2, price3],
   "trailingStopPct": number (% trailing stop after profit locked),
   "timeStopHours": number (exit if no movement after N hours),
-  "worstCaseScenario": "string — what could go wrong and how bad",
+  "worstCaseScenario": "what could go wrong and how bad",
   "reasoning": "string — 450 chars max — cite specific signals that made you pull the trigger (or not). Name the setup type, key levels, and why the R/R is there.",
-  "conviction": "high"|"medium"|"low"
+  "conviction": "high"|"medium"|"low",
+  "optionsPlay": "execute"|"skip",
+  "optionsRationale": "string — 200 chars max — why you execute or skip the options strategy"
 }
 
 THIS IS REAL MONEY. Be precise. Cite levels. Think asymmetry.`,
@@ -734,6 +757,19 @@ FINAL SCORE: ${compositeScore}/100
 Signal: ${compositeScore > 50 ? "🟢 STRONG BULL" : compositeScore > 25 ? "🟢 MILD BULL" : compositeScore > -10 ? "🟡 NEUTRAL" : compositeScore > -30 ? "🔴 MILD BEAR" : "🔴 STRONG BEAR"}
 Weights: Technical 50% | Research 25% | Sentiment 25%
 
+━━━ OPTIONS INTELLIGENCE ━━━
+IV RANK: ${ivCtx.ivRank}/100 | REGIME: ${ivCtx.regime.toUpperCase()} | IV (annualized ATR): ${(approxIV * 100).toFixed(1)}%
+IV Recommendation: ${ivCtx.recommendation}
+Research Volatility Outlook: ${research.volatilityOutlook.toUpperCase()} | Options Bias: ${research.optionsBias.replace(/_/g, " ").toUpperCase()}
+${optOpp ? `BEST OPTIONS STRATEGY IDENTIFIED:
+  Strategy: ${optOpp.strategy} | Type: ${optOpp.type.toUpperCase()} | Strike: $${optOpp.strike}
+  DTE: ${optOpp.expDays} days | Premium: $${optOpp.premium.toFixed(2)}/contract | Delta: ${optOpp.delta.toFixed(2)}
+  Theta: ${optOpp.theta.toFixed(4)}/day | Ann. Return: ${optOpp.annualizedReturn}% | P(OTM): ${optOpp.probabilityOTM}%
+  Rationale: ${optOpp.rationale}
+  → DECIDE: should we execute this options strategy? (execute/skip)
+  → execute if: IV rank > 40, strategy aligns with directional bias, annualized return > 15%, P(OTM) > 70%
+  → skip if: IV too low, earnings risk, conflicting signals` : "No options opportunity identified — set optionsPlay to skip."}
+
 Make your final decision. This is real capital. Be precise.`, 800
   );
 
@@ -763,11 +799,67 @@ Make your final decision. This is real capital. Be precise.`, 800
   result.exitPlan = result.exitPlan ?? `40% at $${p1r}, 30% at $${p2r}, 30% trail`;
   result.worstCaseScenario = result.worstCaseScenario ?? "Stop hit at 2 ATR below entry";
   result.quantity = Math.max(1, Math.round(result.quantity * result.positionSizePct / 100));
+  result.optionsPlay = result.optionsPlay ?? "skip";
+  result.optionsRationale = result.optionsRationale ?? (result.optionsPlay === "execute" ? "IV elevated, strategy aligned" : "Conditions not met for options");
 
   return result;
 }
 
-// ─── Order execution ──────────────────────────────────────────
+// ─── Options order helper ─────────────────────────────────────
+
+async function tryPlaceOptionOrder(
+  agent: typeof agentsTable.$inferSelect,
+  underlying: string,
+  optOpp: OptionOpportunity | null,
+  trader: TraderDecision,
+  price: number,
+  reason: string,
+): Promise<NonNullable<AgentRunResult["optionOrderPlaced"]> | null> {
+  if (!optOpp || trader.optionsPlay !== "execute") return null;
+  try {
+    const expiry = alpaca.getOptionExpiry(optOpp.expDays);
+    const optSymbol = alpaca.buildOptionSymbol(underlying, expiry, optOpp.type, optOpp.strike);
+    const contracts = Math.max(1, Math.min(5, Math.floor(
+      parseFloat(agent.maxPositionSize) / (optOpp.premium * 100 * 2)
+    )));
+    let alpacaId: string | undefined;
+    if (alpaca.isConfigured()) {
+      const ao = await alpaca.placeOptionOrder({ symbol: optSymbol, qty: contracts, side: "buy" });
+      alpacaId = ao.id;
+    }
+    // Log to DB
+    await db.insert(ordersTable).values({
+      symbol: underlying,
+      assetType: "option",
+      side: "buy",
+      orderType: "market",
+      quantity: contracts.toString(),
+      filledPrice: optOpp.premium.toString(),
+      status: alpaca.isConfigured() ? "filled" : "simulated",
+      agentId: agent.id,
+      agentName: agent.name,
+      reason: reason.slice(0, 500),
+      optionType: optOpp.type,
+      strikePrice: optOpp.strike.toString(),
+      expirationDate: expiry.toISOString().split("T")[0],
+      filledAt: new Date(),
+    });
+    return {
+      symbol: underlying,
+      optionSymbol: optSymbol,
+      strategy: optOpp.strategy,
+      optionType: optOpp.type,
+      strike: optOpp.strike,
+      expDays: optOpp.expDays,
+      contracts,
+      premium: optOpp.premium,
+      alpacaId,
+    };
+  } catch (e) {
+    logger.warn({ e, underlying }, "Options order failed — skipping");
+    return null;
+  }
+}
 
 async function placeOrder(
   agent: typeof agentsTable.$inferSelect, symbol: string, side: "buy" | "sell",
@@ -883,7 +975,8 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     sectorRotation: "unknown", fundamentalBias: "fairly_valued",
     institutionalFlow: "neutral", eventCalendar: [], darkPoolSignal: "neutral",
     shortInterest: "unknown", insiderActivity: "neutral", moatStrength: "unknown",
-    priceTarget: null, updownside: null, reasoning: "Research failed.",
+    priceTarget: null, updownside: null, volatilityOutlook: "stable", optionsBias: "neutral",
+    reasoning: "Research failed.",
   };
 
   const fallbackSentiment: SentimentOutput = {
@@ -917,7 +1010,25 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
   );
 
   const maxQty = Math.max(1, Math.floor(maxPos / md.price));
-  const trader = await runTrader(agent, symbol, md, research, sentiment, technical, existingPos, maxQty, compositeScore)
+
+  // ── 4a. Compute IV context BEFORE Trader so it can factor in options ─────
+  const approxIV = (technical.atrPct / 100) * Math.sqrt(252);
+  // Use 52-bar ATR history to simulate historical IV distribution
+  const ivHistory = md.bars.closes.length >= 20
+    ? md.bars.closes.slice(-40).map((_, i, arr) => {
+        if (i < 5) return approxIV;
+        const window = arr.slice(i - 5, i);
+        const returns = window.slice(1).map((c, j) => Math.log(c / window[j]));
+        const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+        const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
+        return Math.sqrt(variance) * Math.sqrt(252);
+      })
+    : [approxIV * 0.8, approxIV * 0.9, approxIV, approxIV * 1.1, approxIV * 1.2];
+  const ivCtx = analyzeIV(approxIV, ivHistory);
+  const optDirection = compositeScore > 20 ? "bullish" : compositeScore < -20 ? "bearish" : "neutral";
+  const optOpp: OptionOpportunity | null = findBestOptionStrategy(md.price, approxIV, ivCtx, optDirection) ?? null;
+
+  const trader = await runTrader(agent, symbol, md, research, sentiment, technical, existingPos, maxQty, compositeScore, ivCtx, optOpp)
     .catch(err => ({
       action: "hold" as const, quantity: 1, confidence: 0,
       stopLossPct: 2, takeProfitPct: 4, riskRewardRatio: 2, positionSizePct: 50,
@@ -925,6 +1036,7 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
       partialProfitAt: [], trailingStopPct: 1.5, timeStopHours: 6,
       worstCaseScenario: "Agent error",
       reasoning: `Trader failed: ${(err as Error).message}`, conviction: "low" as const,
+      optionsPlay: "skip" as const, optionsRationale: "Trader agent error",
     }));
 
   // ── 4. Kelly position sizing ─────────────────────────────
@@ -932,18 +1044,8 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
   const sizing = computePositionSize(md.price, trader.stopLossPct, maxPos, kellyF);
   const finalQty = Math.max(1, Math.min(maxQty, sizing.shares, trader.quantity));
 
-  // ── 5. Options suggestion (if IV elevated) ───────────────
-  let optionSuggestion: string | undefined;
-  try {
-    // Approximate IV from ATR: annualized ATR ≈ IV
-    const approxIV = (technical.atrPct / 100) * Math.sqrt(252);
-    const ivCtx = analyzeIV(approxIV, [approxIV * 0.8, approxIV * 0.9, approxIV * 1.1, approxIV * 1.2]);
-    if (ivCtx.ivRank > 40) {
-      const optOpp = findBestOptionStrategy(md.price, approxIV, ivCtx,
-        compositeScore > 20 ? "bullish" : compositeScore < -20 ? "bearish" : "neutral");
-      if (optOpp) optionSuggestion = `${optOpp.strategy}: ${optOpp.rationale}`;
-    }
-  } catch { /* optional */ }
+  // ── 5. Options suggestion text ───────────────────────────
+  const optionSuggestion = optOpp ? `${optOpp.strategy}: ${optOpp.rationale}` : undefined;
 
   const analysis = `[${trader.confidence}% conf | Score: ${compositeScore} | ${scanResult?.grade ?? "N/A"}] ${trader.reasoning}`;
 
@@ -952,6 +1054,8 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     compositeScore, confidence: trader.confidence, kellyF: +kellyF.toFixed(3),
     circuitBreaker: breaker.reason,
     ...(optionSuggestion ? { optionSuggestion } : {}),
+    ivRank: ivCtx.ivRank,
+    ivRegime: ivCtx.regime,
   };
 
   // ── 6. Execute ───────────────────────────────────────────
@@ -960,10 +1064,13 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     try {
       const result = await placeOrder(agent, symbol, "buy", finalQty, md.price, analysis);
       await updateStats(agent, true, 0, false);
+      // Also execute options play if trader approved it
+      const optRes = await tryPlaceOptionOrder(agent, symbol, optOpp, trader, md.price, analysis);
       return {
         action: "bought", analysis, pipeline,
         orderPlaced: { symbol, side: "buy", quantity: finalQty, price: result.filledPrice,
           stopLoss: levels.stopLoss, takeProfit: levels.takeProfit2, alpacaId: result.alpacaId },
+        ...(optRes ? { optionOrderPlaced: optRes } : {}),
       };
     } catch (err: any) {
       return { action: "error", analysis: `${analysis} — Order failed: ${err.message}`, pipeline, orderPlaced: null };
@@ -984,6 +1091,15 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
       };
     } catch (err: any) {
       return { action: "error", analysis: `${analysis} — Order failed: ${err.message}`, pipeline, orderPlaced: null };
+    }
+  }
+
+  // ── 6b. Pure options play (hold stock but execute option strategy) ───────
+  if (trader.action === "hold" && trader.optionsPlay === "execute" && optOpp) {
+    const optRes = await tryPlaceOptionOrder(agent, symbol, optOpp, trader, md.price, analysis);
+    if (optRes) {
+      await updateStats(agent, false, 0, false);
+      return { action: "option_placed", analysis, pipeline, orderPlaced: null, optionOrderPlaced: optRes };
     }
   }
 

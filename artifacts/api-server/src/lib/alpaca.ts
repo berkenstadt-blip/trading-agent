@@ -205,3 +205,60 @@ export async function getNews(symbol: string, limit = 10): Promise<AlpacaNewsArt
   }
 }
 
+// ─── Options Trading ─────────────────────────────────────────────────────────
+
+/**
+ * Build OCC-format option symbol
+ * e.g. AAPL240119C00150000  (AAPL, Jan 19 2024, Call, $150 strike)
+ * Strike is stored as integer × 1000, zero-padded to 8 digits
+ */
+export function buildOptionSymbol(
+  underlying: string,
+  expiry: Date,
+  type: "call" | "put",
+  strike: number,
+): string {
+  const yy = String(expiry.getFullYear()).slice(-2);
+  const mm = String(expiry.getMonth() + 1).padStart(2, "0");
+  const dd = String(expiry.getDate()).padStart(2, "0");
+  const cp = type === "call" ? "C" : "P";
+  const strikeStr = String(Math.round(strike * 1000)).padStart(8, "0");
+  return `${underlying.toUpperCase()}${yy}${mm}${dd}${cp}${strikeStr}`;
+}
+
+/**
+ * Return the nearest Friday that is at least minDTE calendar days away
+ * (standard weekly/monthly expiry targets)
+ */
+export function getOptionExpiry(minDTE = 14): Date {
+  const d = new Date();
+  d.setDate(d.getDate() + minDTE);
+  const day = d.getDay(); // 0=Sun…6=Sat
+  if (day !== 5) d.setDate(d.getDate() + ((5 - day + 7) % 7));
+  return d;
+}
+
+export interface AlpacaOptionOrderParams {
+  symbol: string;       // OCC format: AAPL240119C00150000
+  qty: number;          // number of contracts
+  side: "buy" | "sell";
+  type?: "market" | "limit";
+  time_in_force?: "day" | "gtc";
+  limit_price?: string;
+}
+
+/** Place an options order via Alpaca (paper trading supports options) */
+export function placeOptionOrder(params: AlpacaOptionOrderParams) {
+  return alpacaFetch<AlpacaOrder>(`${BASE_URL}/orders`, {
+    method: "POST",
+    body: JSON.stringify({
+      symbol: params.symbol,
+      qty: params.qty,
+      side: params.side,
+      type: params.type ?? "market",
+      time_in_force: params.time_in_force ?? "day",
+      ...(params.limit_price ? { limit_price: params.limit_price } : {}),
+    }),
+  });
+}
+
