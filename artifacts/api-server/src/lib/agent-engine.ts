@@ -40,6 +40,7 @@ import { getSocialSentiment, SocialSentimentResult } from "./social-sentiment.js
 
 import {
   blackScholes, analyzeIV, findBestOptionStrategy, IVContext, OptionOpportunity,
+  interpretPCRatio, earningsExpectedMove, ivCrushImpact, normCDF,
 } from "./options-engine.js";
 
 // ─── OpenRouter client ────────────────────────────────────────
@@ -311,7 +312,7 @@ function computeTechnicals(md: MarketData): RawTechOutput {
   } satisfies RawTechOutput;
 }
 
-// ─── Agent 1: RESEARCH — Goldman Sachs Equity Research level ──
+// ─── Agent 1: RESEARCH — Goldman Sachs / Citadel Options Desk level ──
 
 async function runResearch(symbol: string, md: MarketData): Promise<ResearchOutput> {
   const newsBlob = md.news.slice(0, 10).map((n, i) => `[${i+1}] (${n.created_at.slice(0,10)}) ${n.headline}\n    ${n.summary?.slice(0,200) || ""}`).join("\n") || "No news.";
@@ -321,31 +322,47 @@ async function runResearch(symbol: string, md: MarketData): Promise<ResearchOutp
   const pctFrom52Hi = ((md.price - hi52) / hi52 * 100).toFixed(1);
   const pctFrom52Lo = ((md.price - lo52) / lo52 * 100).toFixed(1);
   const avgVol = md.bars.volumes.slice(-20).reduce((a,b)=>a+b,0)/20;
-  const volSurge = md.volume > avgVol * 1.5 ? "ABOVE AVERAGE" : md.volume > avgVol * 0.8 ? "normal" : "BELOW AVERAGE";
+  const volSurge = md.volume > avgVol * 1.5 ? "ABOVE AVERAGE ⚡" : md.volume > avgVol * 0.8 ? "normal" : "BELOW AVERAGE";
+
+  // Compute IV-derived options context to give Research agent real data
+  const approxIV = (md.bars.closes.length >= 10)
+    ? (() => {
+        const ret = md.bars.closes.slice(-20).slice(1).map((c, i) => Math.log(c / md.bars.closes.slice(-20)[i]));
+        const mean = ret.reduce((a,b) => a+b, 0) / ret.length;
+        const variance = ret.reduce((a,b) => a + (b-mean)**2, 0) / ret.length;
+        return Math.sqrt(variance * 252);
+      })()
+    : 0.25;
+  const expectedMove = earningsExpectedMove(md.price, approxIV, 30);
+  const ivNote = `Current IV (annualized): ${(approxIV * 100).toFixed(1)}% | 30-day expected move: ±${expectedMove.expectedMovePct}% ($${expectedMove.expectedMoveDollar.toFixed(2)})`;
 
   return llmJSON<ResearchOutput>(
-    `You are a SENIOR EQUITY RESEARCH ANALYST at Goldman Sachs with 20 years experience covering equities, macro, and institutional flows.
+    `You are a SENIOR EQUITY RESEARCH ANALYST at Goldman Sachs AND head of the OPTIONS INTELLIGENCE desk at Citadel.
+You have 20 years covering equities, macro flows, AND institutional options positioning.
 
-Your job: produce institutional-grade fundamental + macro research on this stock.
+Your job: produce institutional-grade research that drives BOTH stock AND options decisions.
 
-Think like: 
-- GS/MS/JPM sell-side analyst writing a morning note
-- Point72 / Citadel fundamental analyst assessing risk/reward
-- BlackRock portfolio manager assessing macro positioning
+FRAMEWORKS (apply ALL):
+1. MACRO REGIME: Fed policy, yield curve 2s10s, DXY, VIX regime, risk-on/off
+2. SECTOR ROTATION: where institutional money is flowing (sector ETF flows, factor tilts)
+3. FUNDAMENTAL QUALITY: P/E vs growth (PEG), FCF yield, buybacks, margin trajectory, balance sheet
+4. INSTITUTIONAL SIGNALS: dark pool block prints, unusual options flow (calls/puts skew), 13F insider filings, short interest % float
+5. EVENT CALENDAR: exact earnings date, FOMC, CPI, FDA, regulatory — anything that moves IV
+6. OPTIONS-SPECIFIC INTELLIGENCE:
+   - UNUSUAL OPTIONS FLOW: large call/put sweeps at unusual strikes = smart money positioning
+   - IV REGIME: is implied volatility elevated vs historical? → sell premium; or low? → buy cheap options into catalyst
+   - EARNINGS IV CRUSH: stock typically drops 30-50% IV after earnings → sell premium just before, or buy before the pop
+   - SKEW: steep put skew = market hedging (fear), flat skew = complacency
+   - OPEN INTEREST CONCENTRATION: heavy OI at certain strikes = "option pinning" — price gravitates to them
+7. VOLATILITY OUTLOOK: expanding (pre-event, rising VIX) vs contracting (post-event, vol crush)
+8. CATALYST SCORING: probability × magnitude = expected move in $
 
-FRAMEWORKS TO APPLY:
-1. MACRO REGIME: Fed dot plot, yield curve shape (2s10s), DXY trend, VIX regime, risk-on/off
-2. SECTOR ROTATION: which sectors are leading/lagging, where is institutional money flowing
-3. FUNDAMENTAL QUALITY: P/E vs growth (PEG), revenue trajectory, margin expansion/compression, balance sheet, FCF yield, buybacks
-4. INSTITUTIONAL SIGNALS: dark pool prints, unusual options flow, insider 13F filings, short interest % float
-5. EVENT CALENDAR: earnings date (estimate if unknown), FOMC, CPI, PPI, employment data, regulatory events
-6. COMPETITIVE MOAT: wide moat = pricing power, network effects, switching costs; narrow = commodity business
-7. CATALYST IDENTIFICATION: what specific events could move this 10%+ in next 30 days
-8. VOLATILITY OUTLOOK: is IV likely expanding (pre-earnings, uncertainty) or contracting (post-event, stability)? This drives the options bias.
-   - volatilityOutlook: expanding → buy options (cheap before IV spike); contracting → sell premium (IV crush opportunity)
-   - optionsBias: sell_premium (IV rank high, post-catalyst), buy_options (low IV, catalyst imminent), neutral
+OPTIONS BIAS LOGIC:
+- sell_premium: IV rank > 50, post-catalyst, stable macro, low event risk
+- buy_options: IV rank < 35, catalyst imminent (<14 days), expanding uncertainty
+- neutral: mixed signals, moderate IV, wait for clearer setup
 
-OUTPUT: respond ONLY with valid JSON matching this exact schema — no markdown, no commentary:
+OUTPUT: respond ONLY with valid JSON — no markdown:
 {
   "macroRegime": "risk-on"|"risk-off"|"neutral",
   "sectorStrength": "strong"|"weak"|"neutral",
@@ -356,58 +373,58 @@ OUTPUT: respond ONLY with valid JSON matching this exact schema — no markdown,
   "fedStance": "hawkish"|"dovish"|"neutral",
   "yieldCurveSignal": "inverted"|"steepening"|"flat"|"normal",
   "dollarStrength": "strong"|"weak"|"neutral",
-  "sectorRotation": "string — 1 sentence on where money is rotating",
+  "sectorRotation": "1 sentence on where money is rotating",
   "fundamentalBias": "undervalued"|"overvalued"|"fairly_valued",
   "institutionalFlow": "accumulating"|"distributing"|"neutral",
-  "eventCalendar": ["string x3 max — upcoming events with estimated dates"],
+  "eventCalendar": ["string x3 max — events with estimated dates"],
   "darkPoolSignal": "bullish"|"bearish"|"neutral",
   "shortInterest": "high"|"low"|"unknown",
   "insiderActivity": "buying"|"selling"|"neutral",
   "moatStrength": "wide"|"narrow"|"none"|"unknown",
   "priceTarget": number or null,
-  "updownside": number or null (% upside/downside to target),
+  "updownside": number or null,
   "volatilityOutlook": "expanding"|"contracting"|"stable",
   "optionsBias": "sell_premium"|"buy_options"|"neutral",
-  "reasoning": "string — 1 paragraph max 400 chars, cite specific signals"
+  "reasoning": "400 chars max — cite specific macro signals, options flow anomalies, catalyst timing"
 }
 
-CRITICAL: macroScore must reflect ALL factors weighted together. Be precise, not generic. A score of ±50 means strong conviction.`,
+KEY: macroScore ±50 = strong conviction. Be precise. A mediocre analysis is worse than no analysis.`,
 
-    `═══ RESEARCH BRIEF ═══
+    `═══ RESEARCH & OPTIONS BRIEF ═══
 SYMBOL: ${symbol}
-CURRENT PRICE: $${md.price.toFixed(2)}
-DAY CHANGE: ${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}%
-52W HIGH: $${hi52.toFixed(2)} (price is ${pctFrom52Hi}% from high)
-52W LOW: $${lo52.toFixed(2)} (price is +${pctFrom52Lo}% from low)
-TODAY'S VOLUME: ${(md.volume/1e6).toFixed(2)}M — ${volSurge}
-20-DAY PRICE HISTORY: ${priceHist}
+PRICE: $${md.price.toFixed(2)} | DAY: ${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}%
+52W HIGH: $${hi52.toFixed(2)} (${pctFrom52Hi}% from high) | 52W LOW: $${lo52.toFixed(2)} (+${pctFrom52Lo}% from low)
+VOLUME: ${(md.volume/1e6).toFixed(2)}M — ${volSurge}
+20-DAY PRICES: ${priceHist}
 DATA SOURCE: ${md.source}
 
-CURRENT MACRO CONTEXT (USE THIS):
-- Federal Reserve: "higher for longer" stance, rates at 5.25-5.5%, next meeting watching inflation
-- Yield curve: 2s10s spread negative (inverted), signaling recession risk
-- USD Index (DXY): elevated around 104-106, strong dollar headwind for multinationals
-- VIX: moderate regime ~15-18, suggesting controlled risk appetite
-- S&P 500: AI/tech mega-caps driving index, breadth narrow, small-caps lagging
-- Inflation: CPI trending down but sticky core, PCE watched closely by Fed
-- Earnings season: mixed results, guidance cautious, margin pressure from wages
-- Geopolitical: supply chain normalization, China tensions ongoing
+OPTIONS MATH (live):
+${ivNote}
+Straddle fair value (30DTE ATM): $${expectedMove.straddePrice.toFixed(2)} | Playable earnings move: ${expectedMove.playable ? "YES" : "no"}
 
-RECENT NEWS & CATALYSTS:
+MACRO CONTEXT:
+- Fed: rates at 5.25-5.5%, "higher for longer", watching PCE/CPI
+- Yield curve: 2s10s inverted (recession signal), steepening recently
+- DXY: elevated ~104-106 (headwind for multinationals, tailwind for USD earners)
+- VIX: ~15-18 (moderate, controlled risk appetite)
+- SPX: AI/tech mega-caps driving index, narrow breadth, small-caps lagging
+- Earnings: mixed results, guidance cautious, margin pressure from wages/energy
+
+NEWS & CATALYSTS:
 ${newsBlob}
 
 SECTOR CONTEXT:
-- Tech/AI: strong momentum on AI infrastructure buildout
-- Financials: NIM pressure, credit quality concerns
-- Energy: volatile on OPEC+ decisions
-- Healthcare: regulatory pipeline risk
-- Consumer: discretionary weak, staples defensive bid
+- Tech/AI: strong momentum on AI infrastructure buildout (NVDA, MSFT, AMZN)
+- Financials: NIM pressure, credit quality concerns, yield curve headwind
+- Energy: volatile on OPEC+ decisions and China demand
+- Healthcare: regulatory pipeline risk, M&A activity elevated
+- Consumer: discretionary weak, staples defensive bid, Amazon taking share
 
-Provide your institutional research output now.`, 800
+Provide your institutional research + options bias output now.`, 900
   );
 }
 
-// ─── Agent 2: SENTIMENT — Renaissance/Two Sigma quant level ──
+// ─── Agent 2: SENTIMENT — Renaissance/Two Sigma + Options Flow quant level ──
 
 async function runSentiment(symbol: string, md: MarketData, research: ResearchOutput): Promise<SentimentOutput> {
   const [socialData, newsBlob] = await Promise.all([
@@ -415,82 +432,101 @@ async function runSentiment(symbol: string, md: MarketData, research: ResearchOu
     Promise.resolve(md.news.map((n, i) => `[${i+1}] ${n.headline}\n    ${n.summary || "N/A"}`).join("\n\n") || "No news."),
   ]);
 
+  // Compute estimated P/C ratio from social data as a proxy
+  const bullMentions = socialData?.redditBullCount ?? 0;
+  const bearMentions = socialData?.redditBearCount ?? 0;
+  const estimatedPCRatio = bullMentions > 0
+    ? bearMentions / bullMentions  // bear posts / bull posts ≈ P/C proxy
+    : 0.8;
+  const pcSignal = interpretPCRatio(bearMentions, bullMentions);
+
+  // YOLO detection: extreme bullish call buying on forums
+  const yoloDetected = socialData?.isTrendingWSB &&
+    (socialData?.overallSocialScore ?? 0) > 70 &&
+    (socialData?.mentionVelocity === "spiking");
+
+  // IV crush context for sentiment
+  const approxIV = research.volatilityOutlook === "expanding" ? 0.40 : 0.25;
+  const crush = ivCrushImpact(5.0, 0.04, 30);  // example: $5 option, vega 0.04, 30% IV drop
+
   const socialContext = socialData ? `
-═══ REAL-TIME SOCIAL DATA ═══
-REDDIT SIGNAL: ${socialData.redditBullCount} bullish posts / ${socialData.redditBearCount} bearish posts
-Reddit Weighted Score: ${socialData.redditScore}/100
-WSB TRENDING: ${socialData.isTrendingWSB ? "🔥 YES — HIGH PRIORITY SIGNAL" : "not trending"}
-Mention velocity: ${socialData.mentionVelocity.toUpperCase()} (${socialData.mentionCount} total mentions)
-STOCKTWITS: ${socialData.stocktwitsBullPct}% BULLISH / ${socialData.stocktwitsBearPct}% BEARISH
-StockTwits messages: ${socialData.stocktwitsMessageCount} | Watchlist count: ${socialData.stocktwitsWatchlistRank}
-Overall Social Score: ${socialData.overallSocialScore}/100 → ${socialData.socialSignal.toUpperCase()}
+═══ REAL-TIME SOCIAL + OPTIONS SENTIMENT ═══
+REDDIT: ${socialData.redditBullCount} bull posts / ${socialData.redditBearCount} bear posts | Score: ${socialData.redditScore}/100
+WSB TRENDING: ${socialData.isTrendingWSB ? "🔥 YES — potential YOLO/gamma squeeze signal" : "not trending"}
+${yoloDetected ? "⚡ YOLO ALERT: extreme WSB bullish + spiking mentions — retail call buying surge likely" : ""}
+MENTION VELOCITY: ${socialData.mentionVelocity.toUpperCase()} (${socialData.mentionCount} total)
+STOCKTWITS: ${socialData.stocktwitsBullPct}% bull / ${socialData.stocktwitsBearPct}% bear | ${socialData.stocktwitsMessageCount} msgs
+SOCIAL SCORE: ${socialData.overallSocialScore}/100 → ${socialData.socialSignal.toUpperCase()}
+
+PUT/CALL RATIO PROXY (social bear/bull ratio): ${pcSignal.ratio.toFixed(2)}
+P/C Signal: ${pcSignal.signal.toUpperCase()} | Contrarian: ${pcSignal.contrarian.toUpperCase()}
+Interpretation: ${pcSignal.interpretation}
 
 TOP FORUM POSTS:
 ${socialData.topRedditPosts.slice(0, 5).map((p, i) => `[${i+1}] ${p}`).join("\n")}
 
-BULL THESIS FROM FORUMS:
-${socialData.bullThesis.slice(0, 3).map((t, i) => `[${i+1}] ${t}`).join("\n") || "none identified"}
-
-BEAR THESIS FROM FORUMS:
-${socialData.bearThesis.slice(0, 3).map((t, i) => `[${i+1}] ${t}`).join("\n") || "none identified"}` : "Social data unavailable.";
+BULL THESIS: ${socialData.bullThesis.slice(0, 3).map((t, i) => `[${i+1}] ${t}`).join(" | ") || "none"}
+BEAR THESIS: ${socialData.bearThesis.slice(0, 3).map((t, i) => `[${i+1}] ${t}`).join(" | ") || "none"}` : "Social data unavailable.";
 
   return llmJSON<SentimentOutput>(
-    `You are the HEAD OF QUANTITATIVE SENTIMENT RESEARCH at a top-tier hedge fund (think Renaissance Technologies / Two Sigma).
+    `You are the HEAD OF QUANTITATIVE SENTIMENT RESEARCH at Renaissance Technologies + Two Sigma.
+You process multi-source signals including news, social media, AND options market sentiment.
 
-You process multi-source sentiment signals — news, social media, analyst upgrades/downgrades, options flow, retail vs institutional divergence — and output a precise sentiment score with actionable signal.
+YOUR EDGE — you understand:
+1. RETAIL FORUM SENTIMENT leads price by 24-72 hours on small/mid caps
+2. YOLO CALL BUYING on WSB = potential gamma squeeze (market makers forced to buy stock as hedges)
+3. PUT/CALL RATIO is the most powerful contrarian indicator:
+   - P/C > 1.3: extreme fear, contrarian BUY signal, market likely bottoming
+   - P/C < 0.5: extreme greed/euphoria, contrarian SELL signal, top forming
+   - P/C 0.7-1.0: neutral, follow primary trend
+4. OPTIONS FLOW DIVERGENCE: bearish stock news + heavy call buying = institutional accumulation (bullish)
+5. GAMMA SQUEEZE setup: high short interest + call buying surge + WSB trending = explosive upside potential
+6. IV SENTIMENT: when retail buys OTM calls aggressively, IV spikes — premium sellers profit on the other side
+7. SENTIMENT MOMENTUM: improving sentiment = early entry signal; deteriorating = distribution warning
+8. ANALYST CONSENSUS is LAGGING — weight it only 10%, weight social flow 40%, news 30%, options 20%
 
-YOUR EDGE: You understand that:
-1. RETAIL FORUM SENTIMENT often LEADS price by 24-72 hours on small/mid caps
-2. ANALYST UPGRADES/DOWNGRADES are lagging indicators — discount them
-3. WSB "trending" stocks have SHORT SQUEEZE potential — flag this
-4. SENTIMENT DIVERGENCE (bearish news + bullish forums) is a contrarian signal
-5. CATALYST IMMINENT (earnings <7 days, FDA, FOMC) = higher volatility expectation
-6. FEAR = opportunity, GREED = risk. Extreme readings are mean-reverting.
-7. NEWS MOMENTUM matters: is the narrative improving or deteriorating this week?
+SCORING RUBRIC:
++80 to +100: Multi-signal convergence: WSB trending, P/C contrarian buy, positive news, analyst upgrades
++40 to +80: Clear positive bias, improving momentum, no major headwinds
+-10 to +40: Mixed signals, wait for resolution
+-40 to -10: Bearish lean, deteriorating narrative, options bearish
+-100 to -40: Bear thesis dominant, negative cascade, put buying surge
 
-SENTIMENT SCORING RUBRIC:
-- +80 to +100: Multiple catalysts converging, strong bull thesis, WSB trending, analyst upgrades, near-term catalyst
-- +40 to +80: Clear positive bias, good news flow, forums tilted bullish
-- -10 to +40: Mixed signals, wait for clarity
-- -40 to -10: More negative than positive, caution warranted
-- -100 to -40: Bear case clearly winning, negative news cascade, distribution
-
-OUTPUT: respond ONLY with valid JSON:
+OUTPUT — valid JSON only:
 {
   "overallSentiment": "bullish"|"bearish"|"neutral",
   "sentimentScore": number (-100 to +100),
   "newsSignal": "positive"|"negative"|"mixed"|"no_news",
   "fearGreedProxy": "extreme_fear"|"fear"|"neutral"|"greed"|"extreme_greed",
-  "keyHeadlines": ["top 3 most impactful headlines"],
+  "keyHeadlines": ["top 3 impactful headlines"],
   "momentumOfSentiment": "improving"|"deteriorating"|"stable",
   "analystConsensus": "strong_buy"|"buy"|"hold"|"sell"|"unknown",
   "shortSqueezeRisk": boolean,
   "catalystImminent": boolean,
-  "reasoning": "string — 400 chars max, cite specific sentiment signals and their implications"
+  "reasoning": "400 chars max — cite P/C ratio, WSB signals, YOLO detection, options flow divergence, and what it means"
 }
 
-IMPORTANT: shortSqueezeRisk = true if: high short interest + WSB trending + bullish momentum. catalystImminent = true if earnings within 7 days or major event upcoming.`,
+shortSqueezeRisk = true if: high SI + WSB trending + bullish velocity
+catalystImminent = true if earnings <7 days or major event
+YOLO/gamma squeeze = flag in fearGreedProxy as extreme_greed and sentimentScore > 70`,
 
-    `═══ SENTIMENT ANALYSIS REQUEST ═══
+    `═══ SENTIMENT + OPTIONS FLOW ANALYSIS ═══
 SYMBOL: ${symbol} @ $${md.price.toFixed(2)}
 TODAY: ${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}% | Vol: ${(md.volume/1e6).toFixed(1)}M
 ${socialContext}
 
-═══ MACRO BACKDROP (FROM RESEARCH AGENT) ═══
-Regime: ${research.macroRegime.toUpperCase()} | Macro Score: ${research.macroScore}
-Fed: ${research.fedStance.toUpperCase()} | DXY: ${research.dollarStrength.toUpperCase()}
-Sector: ${research.sectorStrength.toUpperCase()} | Rotation: ${research.sectorRotation}
-Institutional Flow: ${research.institutionalFlow.toUpperCase()}
-Dark Pool: ${research.darkPoolSignal.toUpperCase()} | Short Interest: ${research.shortInterest.toUpperCase()}
-Insider Activity: ${research.insiderActivity.toUpperCase()}
-Upcoming Events: ${research.eventCalendar.join(", ") || "none"}
-Catalysts: ${research.catalysts.join("; ") || "none"}
-Headwinds: ${research.headwinds.join("; ") || "none"}
+═══ RESEARCH AGENT BACKDROP ═══
+Regime: ${research.macroRegime.toUpperCase()} | Score: ${research.macroScore}
+Options Bias: ${research.optionsBias.toUpperCase()} | Vol Outlook: ${research.volatilityOutlook.toUpperCase()}
+Fed: ${research.fedStance.toUpperCase()} | Sector: ${research.sectorStrength.toUpperCase()}
+Inst. Flow: ${research.institutionalFlow.toUpperCase()} | Dark Pool: ${research.darkPoolSignal.toUpperCase()}
+Short Interest: ${research.shortInterest.toUpperCase()} | Insider: ${research.insiderActivity.toUpperCase()}
+Events: ${research.eventCalendar.join(", ") || "none"} | Catalysts: ${research.catalysts.join("; ") || "none"}
 
-═══ NEWS FEED (ALPACA) ═══
+═══ NEWS FEED ═══
 ${newsBlob}
 
-Synthesize ALL signals into your sentiment output now.`, 600
+Synthesize ALL signals — especially P/C ratio proxy, YOLO detection, and options flow — into your sentiment output now.`, 650
   );
 }
 
@@ -612,7 +648,7 @@ Identify the market structure, grade this setup, and specify the key level.`, 60
   };
 }
 
-// ─── Agent 4: TRADER — Steve Cohen / Ken Griffin execution level ──
+// ─── Agent 4: TRADER — Steve Cohen / Ken Griffin / Citadel Options Desk level ──
 
 async function runTrader(
   agent: typeof agentsTable.$inferSelect,
@@ -633,6 +669,11 @@ async function runTrader(
   // Derive approxIV locally for use in prompt (consistent with outer scope)
   const approxIV = (technical.atrPct / 100) * Math.sqrt(252);
 
+  // IV crush impact simulation (if we buy options and IV drops 30%)
+  const crushImpact = optOpp ? ivCrushImpact(
+    optOpp.premium, Math.abs(optOpp.vega / 100), 30
+  ) : null;
+
   // Profit levels based on ATR
   const atr = technical.atr;
   const p1r = +(md.price + atr * 2).toFixed(2);
@@ -641,49 +682,52 @@ async function runTrader(
   const stopLevel = +(md.price - atr * 2).toFixed(2);
 
   const result = await llmJSON<TraderDecision>(
-    `You are the HEAD PORTFOLIO MANAGER and CHIEF TRADING OFFICER at a world-class multi-strategy hedge fund. Your trading style is a synthesis of:
+    `You are the HEAD PORTFOLIO MANAGER, CHIEF TRADING OFFICER, and HEAD OF OPTIONS TRADING at a world-class multi-strategy hedge fund.
+Your style is a synthesis of:
+- STEVE COHEN (Point72): high Sharpe, position sizing mastery, cuts losers fast
+- KEN GRIFFIN (Citadel): execution precision, multi-leg options strategies, regime awareness
+- PAUL TUDOR JONES: macro-driven entries, 5:1 R/R minimum, tight risk management
+- SIG / JANE STREET: options flow expertise, expected value thinking, Greeks-based sizing
 
-- STEVE COHEN (Point72): high Sharpe, position sizing mastery, quick to cut losers
-- KEN GRIFFIN (Citadel): execution precision, regime awareness, never fight the tape
-- PAUL TUDOR JONES: macro-driven entries, tight risk management, "5:1 risk/reward or pass"
-- STAN DRUCKENMILLER: concentrated when right, small when uncertain, macro context always
+STOCK DECISION FRAMEWORK:
+1. SETUP GATE: Only A and A+ setups. B and C = hold. No exceptions.
+2. REGIME FILTER: risk-off macro + bearish sentiment = NO NEW LONGS
+3. CONFLUENCE: need ≥3 of 5: (a) macro tailwind (b) sector strong (c) bullish technicals (d) positive sentiment (e) catalyst
+4. SIZING: A+ full Kelly | A = 2/3 | B = 1/3
+5. ENTRIES: market_now (A+ breakout) | limit_near_support (pullback) | breakout_confirm (wait close) | scale_in (uncertainty)
+6. EXITS: stop at 1.5-2x ATR | partial profit 2R (40%) | 3R (30%) | trail rest
+7. TIME STOP: no movement after 6h = exit (something is wrong)
 
-YOUR DECISION FRAMEWORK:
-1. THE SETUP TEST: Only trade A and A+ setups from the Strategy Agent. B and C = hold.
-2. REGIME FILTER: If macro is risk-off AND sentiment is bearish = NO NEW LONGS regardless of technicals
-3. CONFLUENCE REQUIREMENT: Need at least 3 of 5 to align: (a) macro tailwind, (b) sector strength, (c) bullish technicals, (d) positive sentiment, (e) catalyst
-4. POSITION SIZING (Kelly + Risk-Based):
-   - Full size (100%): A+ setup + high confidence + macro aligned + catalyst imminent
-   - 2/3 size (66%): A setup + good confluence + no headwinds
-   - 1/3 size (33%): B setup or mixed signals — starter position only
-5. ENTRY TECHNIQUE:
-   - market_now: A+ breakout with volume, catalyst just announced — don't miss it
-   - limit_near_support: pullback to key level, set limit bid 0.3% above support
-   - breakout_confirm: wait for clean close above resistance before entry
-   - scale_in: uncertainty present — enter 1/3 now, add on confirmation
-6. EXIT MANAGEMENT (non-negotiable):
-   - Always define stop BEFORE entry: 1.5–2.5 ATR below entry
-   - Partial profit at 2R: take 40% off to de-risk
-   - Partial profit at 3R: take another 30%, trail remainder
-   - TIME STOP: if position hasn't moved 1% after 4-6 hours, something is wrong — EXIT
-7. WORST CASE PLANNING: Every trade needs a "what went wrong" scenario defined upfront
+OPTIONS DECISION FRAMEWORK (CRITICAL — this is where the real edge is):
+The options decision is INDEPENDENT from the stock decision.
+You can:
+  - BUY stock + EXECUTE options (adds exposure or hedges)
+  - HOLD stock + EXECUTE options (pure premium collection when IV elevated)
+  - HOLD stock + SKIP options (IV too low, risk too high, conflict with stock direction)
 
-CONFIDENCE THRESHOLDS:
-- 85-100: Highest conviction — full Kelly size, market entry
-- 70-84: High conviction — 2/3 size, can use limit
-- 60-69: Medium conviction — 1/3 size only, must scale in
-- <60: NO TRADE — hold cash, wait for better setup
+OPTIONS EXECUTE CONDITIONS (need ≥3 to execute):
+✅ IV rank > 40 (for credit) or < 35 (for debit — buying cheap)
+✅ Expected Value > $0 (probability-weighted P&L is positive)
+✅ Probability of Profit > 65%
+✅ Strategy aligns with directional bias (don't sell calls on bullish stock)
+✅ No earnings within 7 days (IV crush risk on credit, or unexpected catalyst for debit)
+✅ Kelly fraction > 0.05 (strategy has positive expected edge)
+
+OPTIONS EXECUTION SIZING (Greeks-based):
+- Credit strategy: size so max loss = 1% of portfolio
+- Debit strategy: size so max loss = 0.5% of portfolio (debit = defined risk but theta works against you)
+- Iron Condor: size so max loss = 1.5% of portfolio (higher probability, lower per-loss)
+- Never exceed 5 contracts on a single options position
 
 HARD RULES (non-negotiable):
 - "buy" ONLY if no existing position
-- "sell" ONLY if existing position
-- If circuit breaker warning: cut size by 50%
-- Never risk more than 2% of portfolio on a single trade
-- stopLossPct: 1.5–3.0 (use 1.5-2x ATR)
-- takeProfitPct: minimum 2x stopLossPct (2:1 R/R minimum, prefer 3:1+)
-- Earnings within 5 days: NEVER enter new position (vol event)
+- "sell" ONLY if existing position  
+- Never risk >2% portfolio on any single stock trade
+- Earnings within 5 days: NO new stock entry (but credit options INTO earnings = valid if IV rank > 70)
+- stopLoss: 1.5–3.0% | takeProfit: min 2x stop
+- Confidence <60: hold on stock, but options may still execute if IV edge is clear
 
-OUTPUT: respond ONLY with valid JSON:
+OUTPUT — valid JSON only:
 {
   "action": "buy"|"sell"|"hold",
   "quantity": number (1 to ${maxQty}),
@@ -691,21 +735,21 @@ OUTPUT: respond ONLY with valid JSON:
   "stopLossPct": number (1.5-3.0),
   "takeProfitPct": number (min 2x stopLossPct),
   "riskRewardRatio": number,
-  "positionSizePct": number (33-100, Kelly-based),
+  "positionSizePct": number (33-100),
   "entryTechnique": "market_now"|"limit_near_support"|"breakout_confirm"|"scale_in",
-  "scalingPlan": "string — how to build the position",
-  "exitPlan": "string — exactly how you exit: % at each level",
+  "scalingPlan": "how to build the position",
+  "exitPlan": "exactly how you exit: % at each level",
   "partialProfitAt": [price1, price2, price3],
-  "trailingStopPct": number (% trailing stop after profit locked),
-  "timeStopHours": number (exit if no movement after N hours),
+  "trailingStopPct": number,
+  "timeStopHours": number,
   "worstCaseScenario": "what could go wrong and how bad",
-  "reasoning": "string — 450 chars max — cite specific signals that made you pull the trigger (or not). Name the setup type, key levels, and why the R/R is there.",
+  "reasoning": "450 chars — cite setup type, key levels, confluence factors, R/R",
   "conviction": "high"|"medium"|"low",
   "optionsPlay": "execute"|"skip",
-  "optionsRationale": "string — 200 chars max — why you execute or skip the options strategy"
+  "optionsRationale": "200 chars — cite IV rank, EV, PoP, and why execute or skip. If execute: name the edge clearly."
 }
 
-THIS IS REAL MONEY. Be precise. Cite levels. Think asymmetry.`,
+THIS IS REAL MONEY. Expected value wins long-term. Think asymmetry. Protect capital first.`,
 
     `═══════════════════════════════════════════
   FULL INTELLIGENCE BRIEF — FINAL DECISION
@@ -733,17 +777,15 @@ Research: ${research.reasoning}
 
 ━━━ SENTIMENT AGENT ━━━
 Sentiment: ${sentiment.overallSentiment.toUpperCase()} (${sentiment.sentimentScore}/100) | ${sentiment.fearGreedProxy.toUpperCase()}
-Momentum: ${sentiment.momentumOfSentiment.toUpperCase()} | Analyst Consensus: ${sentiment.analystConsensus.toUpperCase()}
-Short Squeeze Risk: ${sentiment.shortSqueezeRisk ? "🔥 HIGH" : "low"} | Catalyst Imminent: ${sentiment.catalystImminent ? "⚠️ YES" : "no"}
+Momentum: ${sentiment.momentumOfSentiment.toUpperCase()} | Analyst: ${sentiment.analystConsensus.toUpperCase()}
+Short Squeeze: ${sentiment.shortSqueezeRisk ? "🔥 HIGH" : "low"} | Catalyst Imminent: ${sentiment.catalystImminent ? "⚠️ YES" : "no"}
 Headlines: ${sentiment.keyHeadlines.slice(0,2).join(" | ")}
 Sentiment Note: ${sentiment.reasoning}
 
 ━━━ STRATEGY AGENT ━━━
 Technical Score: ${technical.technicalScore}/100
-Setup Quality: ${technical.setupQuality} | Entry Type: ${technical.entryType.toUpperCase()}
-Market Structure: ${technical.marketStructure.replace(/_/g, " ").toUpperCase()}
-Multi-TF Alignment: ${technical.multiTimeframeAlign.replace(/_/g, " ").toUpperCase()}
-KEY LEVEL: $${technical.keyLevel.toFixed(2)} (${technical.keyLevelType.toUpperCase()})
+Setup Quality: ${technical.setupQuality} | Entry: ${technical.entryType.toUpperCase()} | Structure: ${technical.marketStructure.replace(/_/g, " ").toUpperCase()}
+Multi-TF: ${technical.multiTimeframeAlign.replace(/_/g, " ").toUpperCase()} | KEY LEVEL: $${technical.keyLevel.toFixed(2)} (${technical.keyLevelType.toUpperCase()})
 Trend: ${technical.trend.toUpperCase()} (${technical.trendStrength.toUpperCase()}) | EMA: ${technical.emaCrossSignal.toUpperCase()}
 RSI: ${technical.rsi} (${technical.rsiSignal}) ${technical.rsiDivergence !== "none" ? `⚠️ ${technical.rsiDivergence.toUpperCase()} DIVERGENCE` : ""}
 MACD: ${technical.macdCross.toUpperCase()} | BB: ${(technical.bbPercentB*100).toFixed(0)}% (${technical.bbSignal})
@@ -758,19 +800,26 @@ Signal: ${compositeScore > 50 ? "🟢 STRONG BULL" : compositeScore > 25 ? "🟢
 Weights: Technical 50% | Research 25% | Sentiment 25%
 
 ━━━ OPTIONS INTELLIGENCE ━━━
-IV RANK: ${ivCtx.ivRank}/100 | REGIME: ${ivCtx.regime.toUpperCase()} | IV (annualized ATR): ${(approxIV * 100).toFixed(1)}%
-IV Recommendation: ${ivCtx.recommendation}
-Research Volatility Outlook: ${research.volatilityOutlook.toUpperCase()} | Options Bias: ${research.optionsBias.replace(/_/g, " ").toUpperCase()}
-${optOpp ? `BEST OPTIONS STRATEGY IDENTIFIED:
-  Strategy: ${optOpp.strategy} | Type: ${optOpp.type.toUpperCase()} | Strike: $${optOpp.strike}
-  DTE: ${optOpp.expDays} days | Premium: $${optOpp.premium.toFixed(2)}/contract | Delta: ${optOpp.delta.toFixed(2)}
-  Theta: ${optOpp.theta.toFixed(4)}/day | Ann. Return: ${optOpp.annualizedReturn}% | P(OTM): ${optOpp.probabilityOTM}%
+IV RANK: ${ivCtx.ivRank}/100 | REGIME: ${ivCtx.regime.toUpperCase()} | IV: ${(approxIV * 100).toFixed(1)}% annualized
+IV Crush Risk: ${ivCtx.ivCrushRisk.toUpperCase()} | Theta Edge: ${ivCtx.thetaEdge.toUpperCase()} | Expansion Expected: ${ivCtx.ivExpansionExpected ? "YES" : "no"}
+Research Options Bias: ${research.optionsBias.toUpperCase()} | Vol Outlook: ${research.volatilityOutlook.toUpperCase()}
+IV Regime Recommendation: ${ivCtx.recommendation}
+${optOpp ? `
+BEST OPTIONS STRATEGY — INSTITUTIONAL ANALYSIS:
+  Strategy: ${optOpp.strategy} | Direction: ${optOpp.direction.toUpperCase()} | Legs: ${optOpp.legs}
+  Type: ${optOpp.type.toUpperCase()} | Strike(s): $${optOpp.strike}${optOpp.strike2 ? `/$${optOpp.strike2}` : ""}
+  DTE: ${optOpp.expDays} days | Premium: $${optOpp.premium.toFixed(2)}/contract
+  Delta: ${optOpp.delta.toFixed(2)} | Theta: $${optOpp.theta.toFixed(2)}/day | Vega: ${optOpp.vega.toFixed(2)}
+  P(OTM): ${optOpp.probabilityOTM.toFixed(0)}% | P(Profit): ${optOpp.probabilityOfProfit.toFixed(0)}%
+  Expected Value: $${optOpp.expectedValue.toFixed(2)} | Ann. Return: ${optOpp.annualizedReturn}%
+  Kelly Fraction: ${(optOpp.kellyFraction * 100).toFixed(1)}% of account | Max Profit: $${optOpp.maxProfit.toFixed(0)} | Max Loss: $${optOpp.maxLoss.toFixed(0)}
+  ${crushImpact ? `IV Crush Impact (if IV drops 30%): -$${crushImpact.dollarLoss.toFixed(2)} per option (-${crushImpact.pctLoss.toFixed(0)}%)` : ""}
   Rationale: ${optOpp.rationale}
-  → DECIDE: should we execute this options strategy? (execute/skip)
-  → execute if: IV rank > 40, strategy aligns with directional bias, annualized return > 15%, P(OTM) > 70%
-  → skip if: IV too low, earnings risk, conflicting signals` : "No options opportunity identified — set optionsPlay to skip."}
+  
+  → EXECUTE if: EV > 0, PoP > 65%, IV rank aligns (credit: >40, debit: <35), no earnings in 7 days
+  → SKIP if: EV negative, IV misaligned, earnings risk, or directional conflict` : "No options opportunity identified — optionsPlay = skip."}
 
-Make your final decision. This is real capital. Be precise.`, 800
+Make your final decision. Stock action + options play. This is real capital. Think expected value.`, 900
   );
 
   // ─── Hard guardrails ───────────────────────────────────────
