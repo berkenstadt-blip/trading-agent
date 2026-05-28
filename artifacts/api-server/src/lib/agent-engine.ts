@@ -37,6 +37,7 @@ import {
 
 import { findBestOpportunity, SymbolScan, ALL_SYMBOLS } from "./scanner.js";
 import { getSocialSentiment, SocialSentimentResult } from "./social-sentiment.js";
+import { getSymbolIntelligence, formatIntelligenceForPrompt, SymbolIntelligence } from "./data-feeds.js";
 
 import {
   blackScholes, analyzeIV, findBestOptionStrategy, IVContext, OptionOpportunity,
@@ -314,7 +315,7 @@ function computeTechnicals(md: MarketData): RawTechOutput {
 
 // ─── Agent 1: RESEARCH — GS + Point72 + Citadel level ─────────
 
-async function runResearch(symbol: string, md: MarketData): Promise<ResearchOutput> {
+async function runResearch(symbol: string, md: MarketData, intel?: SymbolIntelligence | null): Promise<ResearchOutput> {
   const newsBlob = md.news.slice(0, 15).map((n, i) =>
     `[${i+1}] (${n.created_at.slice(0,10)}) ${n.headline}\n    ${n.summary?.slice(0,250) || ""}`
   ).join("\n") || "No news available.";
@@ -325,18 +326,15 @@ async function runResearch(symbol: string, md: MarketData): Promise<ResearchOutp
   const pctFrom52Hi = ((md.price - hi52) / hi52 * 100).toFixed(1);
   const pctFrom52Lo = ((md.price - lo52) / lo52 * 100).toFixed(1);
 
-  // Volume analysis — 5, 10, 20-day averages for trend detection
   const vol5  = md.bars.volumes.slice(-5).reduce((a,b) => a+b,0) / 5;
   const vol20 = md.bars.volumes.slice(-20).reduce((a,b) => a+b,0) / 20;
-  const volTrend = vol5 > vol20 * 1.3 ? "RISING ⚡ (5d avg above 20d — accumulation signal)" :
-                   vol5 < vol20 * 0.7 ? "FALLING (5d below 20d — distribution signal)" : "NORMAL";
+  const volTrend = vol5 > vol20 * 1.3 ? "RISING ⚡ (accumulation signal)" :
+                   vol5 < vol20 * 0.7 ? "FALLING (distribution signal)" : "NORMAL";
 
-  // Price momentum — 5, 10, 20-day returns
   const ret5  = md.bars.closes.length >= 5  ? ((md.price / md.bars.closes[md.bars.closes.length-6]  - 1) * 100).toFixed(2) : "N/A";
   const ret10 = md.bars.closes.length >= 10 ? ((md.price / md.bars.closes[md.bars.closes.length-11] - 1) * 100).toFixed(2) : "N/A";
   const ret20 = md.bars.closes.length >= 20 ? ((md.price / md.bars.closes[md.bars.closes.length-21] - 1) * 100).toFixed(2) : "N/A";
 
-  // Realized volatility — annualized
   const realizedVol = (() => {
     if (md.bars.closes.length < 10) return 0.25;
     const ret = md.bars.closes.slice(-20).slice(1).map((c,i) => Math.log(c / md.bars.closes.slice(-20)[i]));
@@ -347,128 +345,122 @@ async function runResearch(symbol: string, md: MarketData): Promise<ResearchOutp
 
   const expectedMove = earningsExpectedMove(md.price, realizedVol, 30);
 
-  // Recent price action character
   const last5Closes = md.bars.closes.slice(-5);
   const consecutiveUp   = last5Closes.every((c,i) => i === 0 || c > last5Closes[i-1]);
   const consecutiveDown = last5Closes.every((c,i) => i === 0 || c < last5Closes[i-1]);
-  const priceCharacter  = consecutiveUp ? "5 consecutive UP days — momentum/breakout" :
-                          consecutiveDown ? "5 consecutive DOWN days — distribution/breakdown" :
-                          "mixed — no clear momentum";
+  const priceCharacter  = consecutiveUp ? "5 consecutive UP days — momentum" :
+                          consecutiveDown ? "5 consecutive DOWN days — distribution" : "mixed";
+
+  // Use the pre-fetched intel (shared with Sentiment agent)
+  const intelStr = intel ? formatIntelligenceForPrompt(intel) : "External data unavailable.";
+
+  // Override earningsRisk if we have real earnings data
+  const earningsOverride = intel?.earnings?.isEarningsSoon
+    ? `⚠️ EARNINGS IN ${intel.earnings.daysUntilEarnings} DAYS (${intel.earnings.earningsDate}) — HIGH RISK EVENT`
+    : intel?.earnings?.earningsDate
+    ? `Next earnings: ${intel.earnings.earningsDate} (${intel.earnings.daysUntilEarnings} days)`
+    : "Earnings date: unknown";
 
   return llmJSON<ResearchOutput>(
-    `You are a SENIOR RESEARCH ANALYST with 20+ years across Goldman Sachs (GS equity research), Point72 (fundamental L/S), and Citadel (options intelligence desk).
+    `You are a SENIOR RESEARCH ANALYST with 20+ years across Goldman Sachs (equity research), Point72 (fundamental L/S), and Citadel (options intelligence desk).
 
-YOUR JOB: Produce a DEEP, SPECIFIC research note on this stock RIGHT NOW. Use ONLY the data provided — do NOT use generic/stale macro facts. Derive everything from the news feed and price data given.
+YOUR JOB: Produce a DEEP, SPECIFIC research note using the REAL DATA provided. You have actual Fed rates, actual yield curve, actual insider transactions, actual short interest, and actual earnings dates. Use them.
 
-MANDATORY ANALYSIS FRAMEWORK — work through EACH point:
+MANDATORY ANALYSIS FRAMEWORK:
 
 1. COMPANY-SPECIFIC THESIS
-   — What is this company's core business and why does it matter TODAY?
-   — Is it in a growth phase, mature, or declining?
-   — What is the SPECIFIC reason the stock moved today (up or down)?
+   — What is this company's business? Why does it matter TODAY?
+   — What specifically drove today's price move (use the news)?
+   — Is the stock cheap or expensive relative to growth prospects?
 
-2. MACRO REGIME (derive from NEWS, not assumptions)
-   — What do the headlines tell us about: Fed, rates, inflation, growth?
-   — Risk-on (buy stocks) or risk-off (sell stocks, buy bonds/gold)?
-   — Dollar strength affects multinationals — is it mentioned?
+2. MACRO REGIME (use the FRED data provided — exact numbers)
+   — Cite the ACTUAL Fed rate, 10Y yield, yield spread
+   — Is the curve inverted? Steepening? What does that mean for THIS stock?
+   — Dollar and inflation impact on this specific business?
 
-3. CATALYST ANALYSIS (the most important section)
-   — What specific event could move this stock 5-15%+ in the next 30 days?
-   — Earnings date? Product launch? FDA decision? Partnership? M&A rumor?
-   — Rate the probability of each catalyst: high/medium/low
+3. CATALYST ANALYSIS (most important section)
+   — EARNINGS: use the exact date provided. How many days away?
+   — What could move this 5-15% in next 30 days? Probability?
+   — What is the setup going INTO earnings if it's soon?
 
-4. INSTITUTIONAL SIGNAL READING
-   — Volume surge above 20-day average = smart money moving (accumulation or distribution?)
-   — Price near 52-week high = breakout potential vs distribution zone
-   — Price near 52-week low = capitulation vs value trap?
-   — 5-day momentum vs 20-day = trend confirmation or reversal?
+4. INSTITUTIONAL INTELLIGENCE
+   — Insiders BUYING = management confidence = BULLISH signal
+   — Insiders SELLING = could be diversification or concern
+   — HIGH SHORT FLOAT (>15%) = squeeze potential + elevated risk
+   — Analyst consensus vs current price = where is the smart money target?
 
 5. OPTIONS INTELLIGENCE
-   — IV (realized vol annualized): ${(realizedVol*100).toFixed(1)}%
+   — IV (realized vol): ${(realizedVol*100).toFixed(1)}%
    — Expected 30-day move: ±${expectedMove.expectedMovePct}% ($${expectedMove.expectedMoveDollar.toFixed(2)})
-   — Is this CHEAP (buy options into catalyst) or EXPENSIVE (sell premium)?
-   — IV < 25% = cheap options → buy before event
-   — IV > 50% = expensive options → sell premium, collect theta
-   — IV 25-50% = neutral → direction matters more than vol
+   — Vol regime: ${realizedVol > 0.60 ? "EXTREME — sell premium aggressively" : realizedVol > 0.40 ? "ELEVATED — premium selling edge" : realizedVol > 0.25 ? "NORMAL — directional focus" : "LOW — buy cheap options into catalyst"}
+   — If earnings within 14 days: IV expansion expected → buy options NOW before IV spikes
+   — Post-earnings: IV crush → sell premium immediately
 
-6. SCORING (be PRECISE, not generic)
-   — macroScore: -100 to +100 based on ALL factors weighted
-   — priceTarget: derive from P/E expansion, catalyst magnitude, technical levels
-   — Key risk: what ONE thing could make this trade wrong?
+6. SCORING
+   — macroScore: incorporate the ACTUAL Fed rate and yield spread
+   — priceTarget: use analyst consensus as anchor, adjust for your view
+   — Be PRECISE — not generic
 
-OUTPUT — valid JSON ONLY, no markdown:
+OUTPUT — valid JSON ONLY:
 {
   "macroRegime": "risk-on"|"risk-off"|"neutral",
   "sectorStrength": "strong"|"weak"|"neutral",
   "earningsRisk": "high"|"low"|"none",
-  "catalysts": ["specific catalyst 1 with probability", "catalyst 2", "catalyst 3"],
-  "headwinds": ["specific risk 1", "risk 2", "risk 3"],
-  "macroScore": number (-100 to +100 — BE PRECISE, not 0),
+  "catalysts": ["specific catalyst with probability and timing"],
+  "headwinds": ["specific risk with reasoning"],
+  "macroScore": number (-100 to +100 — cite the actual yield spread and rate),
   "fedStance": "hawkish"|"dovish"|"neutral",
   "yieldCurveSignal": "inverted"|"steepening"|"flat"|"normal",
   "dollarStrength": "strong"|"weak"|"neutral",
-  "sectorRotation": "1 specific sentence — WHERE is money flowing and WHY",
+  "sectorRotation": "1 specific sentence with WHERE and WHY",
   "fundamentalBias": "undervalued"|"overvalued"|"fairly_valued",
   "institutionalFlow": "accumulating"|"distributing"|"neutral",
-  "eventCalendar": ["event 1 with estimated date", "event 2", "event 3"],
+  "eventCalendar": ["exact event with date"],
   "darkPoolSignal": "bullish"|"bearish"|"neutral",
   "shortInterest": "high"|"low"|"unknown",
   "insiderActivity": "buying"|"selling"|"neutral",
   "moatStrength": "wide"|"narrow"|"none"|"unknown",
-  "priceTarget": number or null,
-  "updownside": number or null,
+  "priceTarget": number (use analyst target or derive from fundamentals),
+  "updownside": number (% to target),
   "volatilityOutlook": "expanding"|"contracting"|"stable",
   "optionsBias": "sell_premium"|"buy_options"|"neutral",
-  "reasoning": "SPECIFIC 400-char analysis — cite ACTUAL numbers from the data: price levels, % moves, volume ratios, specific headlines. No generic statements."
+  "reasoning": "400 chars — CITE ACTUAL NUMBERS: Fed rate, yield spread, short float, insider activity, earnings date. Not generic statements."
 }
 
-CRITICAL RULES:
-- macroScore of 0 = LAZY analysis. The market always has a lean. Pick a side.
-- "reasoning" must cite SPECIFIC data points from what you received — not generic statements
-- priceTarget must be a number, not null, if you have any conviction
-- catalysts must be SPECIFIC events, not "positive earnings surprise" (too vague)`,
+RULES: macroScore ≠ 0. priceTarget must be a number. Cite specific data from what you received.`,
 
     `═══ DEEP RESEARCH BRIEF ═══
 TODAY: ${new Date().toDateString()}
-SYMBOL: ${symbol} | PRICE: $${md.price.toFixed(2)} | DAY P&L: ${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}%
+SYMBOL: ${symbol} | PRICE: $${md.price.toFixed(2)} | DAY: ${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}%
 DATA SOURCE: ${md.source}
 
 ── PRICE STRUCTURE ──
-52W HIGH: $${hi52.toFixed(2)} | Now ${pctFrom52Hi}% from high
-52W LOW:  $${lo52.toFixed(2)} | Now +${pctFrom52Lo}% from low
+52W HIGH: $${hi52.toFixed(2)} (${pctFrom52Hi}% from high) | 52W LOW: $${lo52.toFixed(2)} (+${pctFrom52Lo}% from low)
+5d / 10d / 20d returns: ${ret5}% / ${ret10}% / ${ret20}%
+Recent price character: ${priceCharacter}
+Volume trend: ${volTrend}
 30-DAY HISTORY: ${priceHist}
 
-── MOMENTUM ──
-5-day return:  ${ret5}%
-10-day return: ${ret10}%
-20-day return: ${ret20}%
-Recent character: ${priceCharacter}
-
-── VOLUME ──
-Today: ${(md.volume/1e6).toFixed(2)}M
-Volume trend (5d vs 20d avg): ${volTrend}
-5-day avg: ${(vol5/1e6).toFixed(2)}M | 20-day avg: ${(vol20/1e6).toFixed(2)}M
-
-── SESSION ──
-Open: $${md.open.toFixed(2)} | High: $${md.high.toFixed(2)} | Low: $${md.low.toFixed(2)}
-
 ── OPTIONS MATH ──
-Realized Vol (annualized, 20-day): ${(realizedVol*100).toFixed(1)}%
-Expected 30-day move: ±${expectedMove.expectedMovePct}% = ±$${expectedMove.expectedMoveDollar.toFixed(2)}
+Realized Vol (20d ann.): ${(realizedVol*100).toFixed(1)}%
+Expected 30d move: ±${expectedMove.expectedMovePct}% = ±$${expectedMove.expectedMoveDollar.toFixed(2)}
 ATM Straddle (30DTE): $${expectedMove.straddePrice.toFixed(2)}
-Vol regime: ${realizedVol > 0.60 ? "EXTREME — sell premium" : realizedVol > 0.40 ? "ELEVATED — sell premium" : realizedVol > 0.25 ? "NORMAL — directional" : "LOW — buy cheap options"}
 
-── NEWS & CATALYSTS (MOST RECENT FIRST) ──
+── EARNINGS ──
+${earningsOverride}
+
+${intelStr}
+
+── NEWS & CATALYSTS ──
 ${newsBlob}
 
-Analyze this stock NOW. Be specific, cite the data, take a position.`, 1000
+Use the real data. Be specific. Take a position.`, 1000
   );
 }
 
-
 // ─── Agent 2: SENTIMENT — RenTech + Two Sigma + Social quant level ──
 
-async function runSentiment(symbol: string, md: MarketData, research: ResearchOutput): Promise<SentimentOutput> {
+async function runSentiment(symbol: string, md: MarketData, research: ResearchOutput, intel?: SymbolIntelligence | null): Promise<SentimentOutput> {
   const [socialData, newsBlob] = await Promise.all([
     getSocialSentiment(symbol).catch(() => null as SocialSentimentResult | null),
     Promise.resolve(md.news.map((n, i) => `[${i+1}] ${n.headline}\n    ${n.summary || "N/A"}`).join("\n\n") || "No news."),
@@ -588,10 +580,17 @@ Research reasoning: ${research.reasoning}
 ── ALIGNMENT CHECK ──
 ${sentimentMomentumSignal}
 
+── INSTITUTIONAL INTELLIGENCE ──
+Insiders: ${intel?.insiders?.summary ?? "No insider data"}
+Insider Signal: ${intel?.insiders?.signal?.toUpperCase() ?? "unknown"}
+Short Float: ${intel?.shortData?.shortFloat !== null && intel?.shortData?.shortFloat !== undefined ? `${intel.shortData.shortFloat}% ${intel.shortData.shortFloat > 20 ? "⚠️ HIGH" : intel.shortData.shortFloat > 10 ? "elevated" : "normal"}` : "N/A"}
+Short Ratio: ${intel?.shortData?.shortRatio ?? "N/A"} days to cover
+Analyst Consensus: ${intel?.analysts?.consensus?.toUpperCase()?.replace("_"," ") ?? "unknown"} | Target: ${intel?.analysts?.avgTarget ? `$${intel.analysts.avgTarget}` : "N/A"} | Upside: ${intel?.analysts?.upside !== null && intel?.analysts?.upside !== undefined ? `${intel.analysts.upside}%` : "N/A"}
+
 ── FULL NEWS FEED ──
 ${newsBlob}
 
-Find the sentiment divergence. Score it. Explain it.`, 700
+Find the sentiment divergence. Factor in insider activity and short interest. Score it. Explain it.`, 700
   );
 }
 
@@ -1178,8 +1177,10 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
   };
 
   // ── 3. Run 4-agent LLM pipeline ──────────────────────────
-  const research = await runResearch(symbol, md).catch(() => fallbackResearch);
-  const sentiment = await runSentiment(symbol, md, research).catch(() => fallbackSentiment);
+  // Fetch external intel once and share with Research + Sentiment
+  const sharedIntel = await getSymbolIntelligence(symbol).catch(() => null);
+  const research = await runResearch(symbol, md, sharedIntel).catch(() => fallbackResearch);
+  const sentiment = await runSentiment(symbol, md, research, sharedIntel).catch(() => fallbackSentiment);
 
   const rawTechs = computeTechnicals(md);
 
