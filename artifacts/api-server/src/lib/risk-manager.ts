@@ -159,34 +159,34 @@ export function checkCircuitBreaker(params: {
 }): CircuitBreakerResult {
   const { dailyPnL, initialCapital, peakPortfolioValue, currentPortfolioValue, consecutiveLosses, minutesToClose } = params;
 
-  // Daily loss limit: -3%
+  // Daily loss limit: -8% (was -3% — more aggressive, paper trading)
   const dailyLossPct = initialCapital > 0 ? (dailyPnL / initialCapital) * 100 : 0;
-  if (dailyLossPct < -3.0) {
-    return { halt: true, reason: `Daily loss limit hit: ${dailyLossPct.toFixed(2)}% (limit: -3%)`, severity: "halt" };
+  if (dailyLossPct < -8.0) {
+    return { halt: true, reason: `Daily loss limit hit: ${dailyLossPct.toFixed(2)}% (limit: -8%)`, severity: "halt" };
   }
 
-  // Max drawdown from peak: -8%
+  // Max drawdown from peak: -15% (was -8%)
   const drawdownPct = peakPortfolioValue > 0 ? ((currentPortfolioValue - peakPortfolioValue) / peakPortfolioValue) * 100 : 0;
-  if (drawdownPct < -8.0) {
+  if (drawdownPct < -15.0) {
     return { halt: true, reason: `Max drawdown breached: ${drawdownPct.toFixed(2)}% from peak`, severity: "halt" };
   }
 
-  // 4 consecutive losses
-  if (consecutiveLosses >= 4) {
+  // 6 consecutive losses (was 4)
+  if (consecutiveLosses >= 6) {
     return { halt: true, reason: `${consecutiveLosses} consecutive losses — cooling off`, severity: "halt" };
   }
 
   // Too close to market close
-  if (minutesToClose < 15) {
-    return { halt: true, reason: "< 15 min to close — no new entries", severity: "halt" };
+  if (minutesToClose < 10) {
+    return { halt: true, reason: "< 10 min to close — no new entries", severity: "halt" };
   }
 
   // Warnings (trade with caution)
-  if (dailyLossPct < -1.5) {
+  if (dailyLossPct < -4.0) {
     return { halt: false, reason: `Daily loss warning: ${dailyLossPct.toFixed(2)}%`, severity: "warning" };
   }
 
-  if (consecutiveLosses >= 2) {
+  if (consecutiveLosses >= 3) {
     return { halt: false, reason: `${consecutiveLosses} consecutive losses — reduce size`, severity: "warning" };
   }
 

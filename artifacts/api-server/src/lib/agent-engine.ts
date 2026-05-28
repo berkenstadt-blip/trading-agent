@@ -35,7 +35,7 @@ import {
   computeTradeStats,
 } from "./risk-manager.js";
 
-import { findBestOpportunity, SymbolScan } from "./scanner.js";
+import { findBestOpportunity, SymbolScan, ALL_SYMBOLS } from "./scanner.js";
 import { getSocialSentiment, SocialSentimentResult } from "./social-sentiment.js";
 
 import {
@@ -868,8 +868,8 @@ async function tryPlaceOptionOrder(
   try {
     const expiry = alpaca.getOptionExpiry(optOpp.expDays);
     const optSymbol = alpaca.buildOptionSymbol(underlying, expiry, optOpp.type, optOpp.strike);
-    const contracts = Math.max(1, Math.min(5, Math.floor(
-      parseFloat(agent.maxPositionSize) / (optOpp.premium * 100 * 2)
+    const contracts = Math.max(1, Math.min(10, Math.floor(
+      parseFloat(agent.maxPositionSize) / (optOpp.premium * 100 * 1.5)
     )));
     let alpacaId: string | undefined;
     if (alpaca.isConfigured()) {
@@ -949,8 +949,9 @@ function parseSymbols(val: string): string[] {
 }
 
 export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Promise<AgentRunResult> {
-  const symbols = parseSymbols(agent.symbols);
-  if (symbols.length === 0) return { action: "no_signal", analysis: "No symbols configured.", orderPlaced: null };
+  const agentSymbols = parseSymbols(agent.symbols);
+  // Use dynamic universe: agent symbols + full market universe (150+ stocks)
+  const symbols = [...new Set([...agentSymbols, ...ALL_SYMBOLS])];
 
   // ── 0. Market hours check ────────────────────────────────
   if (!isMarketOpen()) return { action: "no_signal", analysis: "Market closed.", orderPlaced: null };
@@ -997,11 +998,12 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
 
   if (scanResult && (scanResult.grade === "A+" || scanResult.grade === "A")) {
     symbol = scanResult.symbol;
-    logger.info({ symbol, grade: scanResult.grade, score: scanResult.technicalScore }, "Scanner picked symbol");
+    logger.info({ symbol, grade: scanResult.grade, score: scanResult.technicalScore, iv: scanResult.approxIV }, "Scanner picked symbol");
   } else {
-    // Fallback: round-robin
-    symbol = symbols[Math.floor(Date.now() / 300_000) % symbols.length];
-    logger.info({ symbol }, "No A/A+ signal, using fallback symbol");
+    // Fallback: pick from high-liquidity universe randomly
+    const fallbacks = ["AAPL","MSFT","NVDA","AMD","SPY","QQQ","META","TSLA"];
+    symbol = fallbacks[Math.floor(Date.now() / 300_000) % fallbacks.length];
+    logger.info({ symbol }, "No A/A+ signal, using high-liquidity fallback");
   }
 
   // ── 2. Fetch full market data ─────────────────────────────
@@ -1016,6 +1018,14 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
       existingPos = { qty: parseFloat(pos.qty), avgCost: parseFloat(pos.avg_entry_price) };
     } catch { /* none */ }
   }
+
+  // ── Aggressive position sizing — use more of the available capital ──
+  // maxPos from agent settings, but boost it: deploy at least 15% of portfolio per trade
+  const portfolioValue = 100000 + parseFloat(agent.totalPnl);
+  const aggressiveMaxPos = Math.max(
+    parseFloat(agent.maxPositionSize),
+    portfolioValue * 0.15   // at least 15% per position
+  );
 
   const fallbackResearch: ResearchOutput = {
     macroRegime: "neutral", sectorStrength: "neutral", earningsRisk: "low",
@@ -1058,7 +1068,7 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     research.macroScore * 0.25 + sentiment.sentimentScore * 0.25 + technical.technicalScore * 0.50
   );
 
-  const maxQty = Math.max(1, Math.floor(maxPos / md.price));
+  const maxQty = Math.max(1, Math.floor(aggressiveMaxPos / md.price));
 
   // ── 4a. Compute IV context BEFORE Trader so it can factor in options ─────
   const approxIV = (technical.atrPct / 100) * Math.sqrt(252);
@@ -1090,7 +1100,7 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
 
   // ── 4. Kelly position sizing ─────────────────────────────
   const kellyF = kellyFraction(stats.winRate, stats.avgWin, stats.avgLoss);
-  const sizing = computePositionSize(md.price, trader.stopLossPct, maxPos, kellyF);
+  const sizing = computePositionSize(md.price, trader.stopLossPct, aggressiveMaxPos, kellyF);
   const finalQty = Math.max(1, Math.min(maxQty, sizing.shares, trader.quantity));
 
   // ── 5. Options suggestion text ───────────────────────────

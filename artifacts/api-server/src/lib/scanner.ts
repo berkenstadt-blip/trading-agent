@@ -1,8 +1,9 @@
 /**
  * ═══════════════════════════════════════════════════════════════
- *  AEGIS SYMBOL SCANNER
- *  Scans all symbols in parallel, ranks by composite score,
- *  returns only A+ and A opportunities worth trading
+ *  AEGIS DYNAMIC MARKET SCANNER v2
+ *  Scans 150+ symbols across all sectors — no fixed watchlist.
+ *  Finds the highest-conviction opportunities in real-time.
+ *  Options-aware: flags high-IV + catalyst setups for options plays.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -14,6 +15,35 @@ import {
   compositeSignalScore,
 } from "./indicators.js";
 import { logger } from "./logger.js";
+
+// ─── Dynamic Universe — 150+ symbols across all sectors ──────
+
+export const MARKET_UNIVERSE: Record<string, string[]> = {
+  // Mega-cap tech & AI (highest options liquidity)
+  tech: ["AAPL", "MSFT", "NVDA", "META", "GOOGL", "AMZN", "TSLA", "AMD", "INTC", "QCOM",
+         "ORCL", "CRM", "ADBE", "NOW", "SNOW", "PLTR", "UBER", "LYFT", "SHOP", "NET"],
+  // Semiconductors (high volatility, great options)
+  semis: ["SMCI", "AVGO", "MU", "TSM", "AMAT", "LRCX", "KLAC", "MRVL", "ON", "TXN"],
+  // ETFs with high options volume
+  etfs: ["SPY", "QQQ", "IWM", "XLK", "SOXX", "ARKK", "GLD", "TLT", "VIX", "SQQQ", "TQQQ"],
+  // Financials (rate-sensitive, volatile)
+  financials: ["JPM", "GS", "MS", "BAC", "C", "WFC", "BLK", "SCHW", "COIN", "HOOD"],
+  // Healthcare & Biotech (high IV around FDA events)
+  biotech: ["MRNA", "BNTX", "BIIB", "GILD", "REGN", "VRTX", "LLY", "PFE", "ABBV", "BMY"],
+  // Energy (oil/gas volatile plays)
+  energy: ["XOM", "CVX", "OXY", "COP", "SLB", "HAL", "MPC", "VLO", "DVN", "FANG"],
+  // Consumer & Retail
+  consumer: ["AMZN", "COST", "WMT", "TGT", "LULU", "NKE", "SBUX", "MCD", "DIS", "NFLX"],
+  // High-momentum/meme potential (high options interest)
+  momentum: ["MSTR", "RKLB", "IONQ", "QUBT", "RGTI", "BBAI", "AI", "SOUN", "BBIO", "ACHR"],
+  // Macro/commodities
+  macro: ["GLD", "SLV", "USO", "UNG", "DBA", "BITI", "BITO", "IBIT", "MARA", "RIOT"],
+};
+
+// Flattened universe, deduplicated
+export const ALL_SYMBOLS: string[] = [
+  ...new Set(Object.values(MARKET_UNIVERSE).flat()),
+];
 
 export interface SymbolScan {
   symbol: string;
@@ -35,12 +65,15 @@ export interface SymbolScan {
   direction: "long" | "short" | "none";
   grade: "A+" | "A" | "B" | "skip";
   gradingReasons: string[];
+  // Options metadata
+  approxIV: number;          // annualized IV from ATR
+  optionsPotential: "high" | "medium" | "low"; // for options scanner
+  sector: string;
 }
 
 async function buildSyntheticBars(symbol: string): Promise<{
   closes: number[]; highs: number[]; lows: number[]; volumes: number[]; opens: number[];
 }> {
-  // Fallback: generate synthetic bars from current quote
   const q = getSimulatedQuote(symbol);
   const bars = { closes: [] as number[], highs: [] as number[], lows: [] as number[], volumes: [] as number[], opens: [] as number[] };
   let p = q.previousClose;
@@ -60,11 +93,17 @@ async function buildSyntheticBars(symbol: string): Promise<{
   return bars;
 }
 
+function getSector(symbol: string): string {
+  for (const [sector, syms] of Object.entries(MARKET_UNIVERSE)) {
+    if (syms.includes(symbol)) return sector;
+  }
+  return "other";
+}
+
 export async function scanSymbol(symbol: string): Promise<SymbolScan> {
   let price = 0, changePercent = 0;
   let bars = { closes: [] as number[], highs: [] as number[], lows: [] as number[], volumes: [] as number[], opens: [] as number[] };
 
-  // Fetch live data
   if (alpaca.isConfigured()) {
     try {
       const snap = await alpaca.getSnapshot(symbol);
@@ -99,7 +138,6 @@ export async function scanSymbol(symbol: string): Promise<SymbolScan> {
 
   const { closes, highs, lows, volumes, opens } = bars;
 
-  // Compute all indicators
   const rsiVal    = rsi(closes, 14);
   const macdRes   = macd(closes);
   const bb        = bollingerBands(closes, 20);
@@ -129,34 +167,58 @@ export async function scanSymbol(symbol: string): Promise<SymbolScan> {
     ichimokuPriceVsCloud: price > ema50Val ? "above" : "below",
   });
 
-  const direction: SymbolScan["direction"] = score >= 25 ? "long" : score <= -25 ? "short" : "none";
+  // Approximate IV from recent realized vol
+  const approxIV = closes.length >= 10
+    ? (() => {
+        const ret = closes.slice(-20).slice(1).map((c, i) => Math.log(c / closes.slice(-20)[i]));
+        const mean = ret.reduce((a, b) => a + b, 0) / ret.length;
+        const variance = ret.reduce((a, b) => a + (b - mean) ** 2, 0) / ret.length;
+        return Math.sqrt(variance * 252);
+      })()
+    : atrPct / 100 * Math.sqrt(252);
 
-  // Grading logic
+  // Options potential: high IV + liquid symbol = prime options candidate
+  const isHighLiquid = ["SPY","QQQ","AAPL","MSFT","NVDA","TSLA","AMD","META","GOOGL","AMZN"].includes(symbol);
+  const optionsPotential: SymbolScan["optionsPotential"] =
+    approxIV > 0.50 ? "high" :
+    approxIV > 0.30 || isHighLiquid ? "medium" : "low";
+
+  const direction: SymbolScan["direction"] = score >= 20 ? "long" : score <= -20 ? "short" : "none";
+
+  // ── Grading — more aggressive thresholds ──
   const reasons: string[] = [];
   let grade: SymbolScan["grade"] = "skip";
 
   const absScore = Math.abs(score);
-  const hasVolumeConf = volR > 1.3;
-  const hasCandleConf = Math.abs(candles.patternScore) >= 30;
+  const hasVolumeConf = volR > 1.2;  // was 1.3 — more lenient
+  const hasCandleConf = Math.abs(candles.patternScore) >= 20; // was 30
   const hasMacdConf   = macdRes.crossover !== "none";
+  const hasRSIEdge    = rsiVal < 35 || rsiVal > 65; // oversold/overbought
 
-  if (absScore >= 55 && hasVolumeConf && (hasCandleConf || hasMacdConf)) {
+  if (absScore >= 50 && hasVolumeConf && (hasCandleConf || hasMacdConf)) {
     grade = "A+";
-    reasons.push(`Score ${score} | Vol ${volR}x | ${candles.detected.join(",") || "MACD cross"}`);
-  } else if (absScore >= 40 && hasVolumeConf) {
+    reasons.push(`Score ${score} | Vol ${volR.toFixed(1)}x | ${candles.detected.join(",") || "MACD"}`);
+  } else if (absScore >= 35 && (hasVolumeConf || hasMacdConf)) {
     grade = "A";
-    reasons.push(`Score ${score} | Vol ${volR}x`);
-  } else if (absScore >= 25) {
+    reasons.push(`Score ${score} | Vol ${volR.toFixed(1)}x | MACD:${macdRes.crossover}`);
+  } else if (absScore >= 20 || hasRSIEdge) {
     grade = "B";
-    reasons.push(`Score ${score}`);
+    reasons.push(`Score ${score} | RSI ${rsiVal.toFixed(0)}`);
   } else {
     grade = "skip";
-    reasons.push(`Score too low (${score})`);
+    reasons.push(`Weak signal (${score})`);
   }
 
-  // Disqualifiers
-  if (atrPct > 5) { grade = "skip"; reasons.push("Too volatile (ATR > 5%)"); }
-  if (Math.abs(changePercent) > 8) { grade = "skip"; reasons.push("Extreme daily move — avoid chasing"); }
+  // Disqualifiers — less strict for options plays
+  if (price < 2) { grade = "skip"; reasons.push("Price too low (<$2)"); }
+  if (atrPct > 12) { grade = "skip"; reasons.push("Too volatile (ATR > 12%)"); }
+  if (Math.abs(changePercent) > 15) { grade = "skip"; reasons.push("Extreme move — avoid chasing"); }
+
+  // Options-grade boost: high IV + good setup = upgrade B→A for options
+  if (grade === "B" && optionsPotential === "high" && approxIV > 0.45) {
+    grade = "A";
+    reasons.push("Upgraded to A: high IV options opportunity");
+  }
 
   return {
     symbol, price, changePercent, rsi: rsiVal,
@@ -168,24 +230,39 @@ export async function scanSymbol(symbol: string): Promise<SymbolScan> {
     atrPct, stochK: stoch.k, williamsR: willR.value,
     vwapRelation: vwapRel, technicalScore: score,
     direction, grade, gradingReasons: reasons,
+    approxIV: +approxIV.toFixed(4), optionsPotential, sector: getSector(symbol),
   };
 }
 
 export async function scanAllSymbols(symbols: string[]): Promise<SymbolScan[]> {
-  const results = await Promise.allSettled(symbols.map(s => scanSymbol(s)));
-  const scans: SymbolScan[] = [];
-  for (const r of results) {
-    if (r.status === "fulfilled") scans.push(r.value);
+  // Scan in parallel batches of 20 to avoid rate limits
+  const batchSize = 20;
+  const all: SymbolScan[] = [];
+  for (let i = 0; i < symbols.length; i += batchSize) {
+    const batch = symbols.slice(i, i + batchSize);
+    const results = await Promise.allSettled(batch.map(s => scanSymbol(s)));
+    for (const r of results) {
+      if (r.status === "fulfilled") all.push(r.value);
+    }
+    // Small delay between batches to respect rate limits
+    if (i + batchSize < symbols.length) {
+      await new Promise(r => setTimeout(r, 200));
+    }
   }
-  // Sort by absolute score descending
-  return scans.sort((a, b) => Math.abs(b.technicalScore) - Math.abs(a.technicalScore));
+  return all.sort((a, b) => Math.abs(b.technicalScore) - Math.abs(a.technicalScore));
 }
 
 export async function findBestOpportunity(
-  symbols: string[],
+  symbols: string[],  // Now accepts dynamic universe or agent symbols
   existingPositions: string[] = [],
 ): Promise<SymbolScan | null> {
-  const scans = await scanAllSymbols(symbols);
+  // Always scan the full market universe + agent symbols
+  const universe = [...new Set([...ALL_SYMBOLS, ...symbols])];
+
+  // Limit to 80 symbols max per scan cycle for performance
+  const toScan = universe.slice(0, 80);
+
+  const scans = await scanAllSymbols(toScan);
 
   // Filter: no existing positions, direction clear, grade A or better
   const candidates = scans.filter(s =>
@@ -195,20 +272,34 @@ export async function findBestOpportunity(
   );
 
   if (candidates.length === 0) {
-    logger.info({ scanned: scans.length }, "Scanner: no A/A+ opportunities found");
+    // Fallback: take best B-grade if options potential is high
+    const bGrade = scans.filter(s =>
+      !existingPositions.includes(s.symbol) &&
+      s.grade === "B" &&
+      s.optionsPotential === "high" &&
+      s.direction !== "none"
+    );
+    if (bGrade.length > 0) {
+      logger.info({ symbol: bGrade[0].symbol }, "Scanner: using B-grade options play");
+      return bGrade[0];
+    }
+    logger.info({ scanned: scans.length }, "Scanner: no opportunities found");
     return null;
   }
 
-  // Prefer A+ over A, then by score
+  // Prefer A+ over A, then by absolute score, then by options potential
+  const optScore = (s: SymbolScan) => s.optionsPotential === "high" ? 2 : s.optionsPotential === "medium" ? 1 : 0;
   const best = candidates.sort((a, b) => {
-    const gradeScore = (g: string) => g === "A+" ? 2 : g === "A" ? 1 : 0;
-    return gradeScore(b.grade) - gradeScore(a.grade) ||
-           Math.abs(b.technicalScore) - Math.abs(a.technicalScore);
+    const gradeScore = (g: string) => g === "A+" ? 3 : g === "A" ? 2 : 1;
+    return (gradeScore(b.grade) - gradeScore(a.grade)) ||
+           (optScore(b) - optScore(a)) ||
+           (Math.abs(b.technicalScore) - Math.abs(a.technicalScore));
   })[0];
 
   logger.info({
     symbol: best.symbol, grade: best.grade, score: best.technicalScore,
-    direction: best.direction, candidates: candidates.length,
+    direction: best.direction, iv: best.approxIV, options: best.optionsPotential,
+    candidates: candidates.length, scanned: scans.length,
   }, "Scanner: best opportunity found");
 
   return best;
