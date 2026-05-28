@@ -52,11 +52,18 @@ const MODEL = "nousresearch/hermes-3-llama-3.1-70b";
 let _client: OpenAI | null = null;
 function getClient(): OpenAI {
   if (_client) return _client;
-  const baseURL = process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL;
-  const apiKey  = process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY;
-  if (!baseURL || !apiKey) throw new Error("OpenRouter not configured");
+  const baseURL = process.env.AI_INTEGRATIONS_OPENROUTER_BASE_URL
+    ?? "https://openrouter.ai/api/v1";
+  const apiKey  = process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY
+    ?? process.env.OPENROUTER_API_KEY ?? "";
+  if (!apiKey) throw new Error("OpenRouter not configured — set AI_INTEGRATIONS_OPENROUTER_API_KEY");
   _client = new OpenAI({ baseURL, apiKey });
   return _client;
+}
+
+// ── Is LLM available? ────────────────────────────────────────
+function isLLMConfigured(): boolean {
+  return !!(process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY);
 }
 
 async function llmJSON<T>(system: string, user: string, maxTokens = 600): Promise<T> {
@@ -1215,10 +1222,56 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     research.macroScore * 0.25 + sentiment.sentimentScore * 0.25 + technical.technicalScore * 0.50
   );
 
+  // ── 3b. TECHINCAL-ONLY execution path (when LLM unavailable or scan grade A+) ──
+  // If scanner found A+ signal, don't wait for LLM — execute now based on technicals alone.
+  // This guarantees the agent trades even if OpenRouter is down/slow.
+  if (!isLLMConfigured() || (scanResult?.grade === "A+" && rawTechs.technicalScore >= 55)) {
+    const direction = scanResult?.direction ?? (rawTechs.technicalScore > 0 ? "long" : "short");
+    const isBuy = direction === "long";
+    const side: "buy" | "sell" = existingPos ? "sell" : (isBuy ? "buy" : "hold" as any);
+
+    if (side === "buy" && !existingPos) {
+      const techQty = Math.max(1, Math.min(maxQty, Math.floor((portfolioValue * 0.25) / md.price)));
+      const levels = computeStopLevels(md.price, rawTechs.atr, "long", 2);
+      const techAnalysis = `[TECHNICAL AUTO] Score:${rawTechs.technicalScore} Grade:${scanResult?.grade} RSI:${rawTechs.rsi.toFixed(0)} MACD:${rawTechs.macdCross} Vol:${rawTechs.volumeRatio}x`;
+      try {
+        const result = await placeOrder(agent, symbol, "buy", techQty, md.price, techAnalysis);
+        await updateStats(agent, true, 0, false);
+        logger.info({ symbol, qty: techQty, score: rawTechs.technicalScore }, "TECHNICAL AUTO-TRADE executed");
+        return {
+          action: "bought", analysis: techAnalysis,
+          pipeline: { scanGrade: scanResult?.grade ?? "A+", compositeScore: rawTechs.technicalScore, confidence: 75, kellyF: 0.25, circuitBreaker: "none" },
+          orderPlaced: { symbol, side: "buy", quantity: techQty, price: result.filledPrice, stopLoss: levels.stopLoss, takeProfit: levels.takeProfit2, alpacaId: result.alpacaId },
+        };
+      } catch (err: any) {
+        logger.error({ err, symbol }, "Technical auto-trade order failed");
+      }
+    } else if (side === "sell" && existingPos) {
+      const techQty = existingPos.qty;
+      const levels = computeStopLevels(existingPos.avgCost, rawTechs.atr, "long", 2);
+      const techAnalysis = `[TECHNICAL AUTO SELL] Score:${rawTechs.technicalScore} RSI:${rawTechs.rsi.toFixed(0)}`;
+      try {
+        const result = await placeOrder(agent, symbol, "sell", techQty, md.price, techAnalysis);
+        const pnl = (result.filledPrice - existingPos.avgCost) * techQty;
+        await updateStats(agent, true, pnl, pnl > 0);
+        logger.info({ symbol, qty: techQty, pnl }, "TECHNICAL AUTO-SELL executed");
+        return {
+          action: "sold", analysis: techAnalysis,
+          pipeline: { scanGrade: scanResult?.grade ?? "A+", compositeScore: rawTechs.technicalScore, confidence: 75, kellyF: 0.25, circuitBreaker: "none" },
+          orderPlaced: { symbol, side: "sell", quantity: techQty, price: result.filledPrice, stopLoss: levels.stopLoss, takeProfit: levels.takeProfit2, alpacaId: result.alpacaId },
+        };
+      } catch (err: any) {
+        logger.error({ err, symbol }, "Technical auto-sell order failed");
+      }
+    }
+  }
+
+  const compositeScore = Math.round(
+    research.macroScore * 0.25 + sentiment.sentimentScore * 0.25 + technical.technicalScore * 0.50
+  );
+
   // No cap on quantity — let Kelly sizing decide. Paper trading = full exposure.
   const maxQty = Math.max(1, Math.floor(aggressiveMaxPos / md.price)); // can go all-in
-
-  // ── 4a. Compute IV context BEFORE Trader so it can factor in options ─────
   const approxIV = (technical.atrPct / 100) * Math.sqrt(252);
   // Use 52-bar ATR history to simulate historical IV distribution
   const ivHistory = md.bars.closes.length >= 20
