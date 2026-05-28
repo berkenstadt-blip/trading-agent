@@ -1222,13 +1222,14 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     research.macroScore * 0.25 + sentiment.sentimentScore * 0.25 + technical.technicalScore * 0.50
   );
 
-  // ── 3b. TECHINCAL-ONLY execution path (when LLM unavailable or scan grade A+) ──
-  // If scanner found A+ signal, don't wait for LLM — execute now based on technicals alone.
-  // This guarantees the agent trades even if OpenRouter is down/slow.
+  // No cap on quantity — let Kelly sizing decide. Paper trading = full exposure.
+  const maxQty = Math.max(1, Math.floor(aggressiveMaxPos / md.price)); // can go all-in
+
+  // ── 3b. TECHNICAL-ONLY execution path (when LLM unavailable or scan grade A+) ──
   if (!isLLMConfigured() || (scanResult?.grade === "A+" && rawTechs.technicalScore >= 55)) {
     const direction = scanResult?.direction ?? (rawTechs.technicalScore > 0 ? "long" : "short");
     const isBuy = direction === "long";
-    const side: "buy" | "sell" = existingPos ? "sell" : (isBuy ? "buy" : "hold" as any);
+    const side: "buy" | "sell" | "hold" = existingPos ? "sell" : (isBuy ? "buy" : "hold");
 
     if (side === "buy" && !existingPos) {
       const techQty = Math.max(1, Math.min(maxQty, Math.floor((portfolioValue * 0.25) / md.price)));
@@ -1266,12 +1267,6 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     }
   }
 
-  const compositeScore = Math.round(
-    research.macroScore * 0.25 + sentiment.sentimentScore * 0.25 + technical.technicalScore * 0.50
-  );
-
-  // No cap on quantity — let Kelly sizing decide. Paper trading = full exposure.
-  const maxQty = Math.max(1, Math.floor(aggressiveMaxPos / md.price)); // can go all-in
   const approxIV = (technical.atrPct / 100) * Math.sqrt(252);
   // Use 52-bar ATR history to simulate historical IV distribution
   const ivHistory = md.bars.closes.length >= 20
