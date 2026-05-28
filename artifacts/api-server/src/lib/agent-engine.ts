@@ -705,27 +705,28 @@ You can:
   - HOLD stock + EXECUTE options (pure premium collection when IV elevated)
   - HOLD stock + SKIP options (IV too low, risk too high, conflict with stock direction)
 
-OPTIONS EXECUTE CONDITIONS (need ≥3 to execute):
-✅ IV rank > 40 (for credit) or < 35 (for debit — buying cheap)
-✅ Expected Value > $0 (probability-weighted P&L is positive)
-✅ Probability of Profit > 65%
-✅ Strategy aligns with directional bias (don't sell calls on bullish stock)
-✅ No earnings within 7 days (IV crush risk on credit, or unexpected catalyst for debit)
-✅ Kelly fraction > 0.05 (strategy has positive expected edge)
+OPTIONS EXECUTE CONDITIONS (need ≥2 to execute — aggressive):
+✅ Expected Value > $0 (positive edge)
+✅ Probability of Profit > 55% (lower bar — take the trade)
+✅ Strategy aligns directionally OR IV regime is clear (elevated = sell, low = buy)
+✅ Kelly fraction > 0.02 (any positive edge)
 
-OPTIONS EXECUTION SIZING (Greeks-based):
-- Credit strategy: size so max loss = 1% of portfolio
-- Debit strategy: size so max loss = 0.5% of portfolio (debit = defined risk but theta works against you)
-- Iron Condor: size so max loss = 1.5% of portfolio (higher probability, lower per-loss)
-- Never exceed 5 contracts on a single options position
+OPTIONS EXECUTION SIZING — NO LIMITS:
+- Use Kelly fraction × full portfolio value = dollar allocation
+- No contract maximum. If Kelly says 50 contracts, buy 50 contracts.
+- Earnings plays: BUY options before earnings when IV is < 50 (cheap vol into catalyst)
+- Post-earnings: SELL premium immediately after (IV crush = free money)
+- YOLO mode: if WSB trending + short squeeze + A+ setup → max contracts, max aggression
 
-HARD RULES (non-negotiable):
+HARD RULES:
 - "buy" ONLY if no existing position
-- "sell" ONLY if existing position  
-- Never risk >2% portfolio on any single stock trade
-- Earnings within 5 days: NO new stock entry (but credit options INTO earnings = valid if IV rank > 70)
-- stopLoss: 1.5–3.0% | takeProfit: min 2x stop
-- Confidence <60: hold on stock, but options may still execute if IV edge is clear
+- "sell" ONLY if existing position
+- PAPER TRADING: no portfolio risk limits. Go big when the edge is there.
+- Earnings risk: options plays INTO earnings are ENCOURAGED when IV is high
+- stopLoss: 1.5–5.0% | takeProfit: minimum 2x stop, prefer 5x+
+- Confidence <50: hold. Confidence 50+: execute with appropriate size.
+- EXTRAORDINARY RESULTS require extraordinary conviction AND position sizes.
+  Never sandbag. If the signal is A+ and confluence is 5/5: go ALL IN.
 
 OUTPUT — valid JSON only:
 {
@@ -822,34 +823,33 @@ BEST OPTIONS STRATEGY — INSTITUTIONAL ANALYSIS:
 Make your final decision. Stock action + options play. This is real capital. Think expected value.`, 900
   );
 
-  // ─── Hard guardrails ───────────────────────────────────────
+  // ─── Beast Mode Guardrails — minimal, only prevent invalid states ──────────
   if (!["buy","sell","hold"].includes(result.action)) result.action = "hold";
-  if (result.action === "buy" && existingPos) result.action = "hold";
-  if (result.action === "sell" && !existingPos) result.action = "hold";
-  // Earnings within 5 days = no new entries
-  if (research.earningsRisk === "high" && !existingPos) result.action = "hold";
-  // Need A or A+ setup to trade
-  if (technical.setupQuality === "C" && result.action !== "hold") result.action = "hold";
-  // Confidence gate
-  if ((result.confidence ?? 0) < 60) result.action = "hold";
-  // Macro risk-off + bearish sentiment = no new longs
-  if (research.macroRegime === "risk-off" && sentiment.overallSentiment === "bearish" && result.action === "buy") result.action = "hold";
+  if (result.action === "buy" && existingPos) result.action = "hold";   // can't double-buy
+  if (result.action === "sell" && !existingPos) result.action = "hold"; // can't sell air
+  // Only gate: confidence below 40 = truly uncertain, hold
+  if ((result.confidence ?? 0) < 40) result.action = "hold";
+  // All other gates REMOVED: no earnings gate, no setup quality gate, no macro regime gate
 
+  // Sizing: no upper cap on quantity — full Kelly
   result.quantity = Math.max(1, Math.min(maxQty, Math.round(result.quantity) || 1));
   result.confidence = Math.max(0, Math.min(100, result.confidence ?? 50));
-  result.stopLossPct = Math.max(1.5, Math.min(3.0, result.stopLossPct ?? technical.atrPct * 1.5));
-  result.takeProfitPct = Math.max(result.stopLossPct * 2.0, result.takeProfitPct ?? result.stopLossPct * 2.5);
+  // Wide stop/TP range for aggressive plays
+  result.stopLossPct = Math.max(1.0, Math.min(8.0, result.stopLossPct ?? technical.atrPct * 2));
+  result.takeProfitPct = Math.max(result.stopLossPct * 2.0, result.takeProfitPct ?? result.stopLossPct * 4);
   result.riskRewardRatio = +(result.takeProfitPct / result.stopLossPct).toFixed(2);
-  result.positionSizePct = Math.max(33, Math.min(100, result.positionSizePct ?? 50));
+  // positionSizePct: allow 100% (all-in on A+ plays)
+  result.positionSizePct = Math.max(25, Math.min(100, result.positionSizePct ?? 75));
   result.trailingStopPct = result.trailingStopPct ?? result.stopLossPct * 0.8;
-  result.timeStopHours = result.timeStopHours ?? 6;
+  result.timeStopHours = result.timeStopHours ?? 8;
   result.partialProfitAt = result.partialProfitAt ?? [p1r, p2r, p3r];
   result.scalingPlan = result.scalingPlan ?? "Full position at entry";
-  result.exitPlan = result.exitPlan ?? `40% at $${p1r}, 30% at $${p2r}, 30% trail`;
-  result.worstCaseScenario = result.worstCaseScenario ?? "Stop hit at 2 ATR below entry";
+  result.exitPlan = result.exitPlan ?? `50% at $${p1r}, 30% at $${p2r}, 20% trail`;
+  result.worstCaseScenario = result.worstCaseScenario ?? "Stop hit — accept loss, move on";
   result.quantity = Math.max(1, Math.round(result.quantity * result.positionSizePct / 100));
-  result.optionsPlay = result.optionsPlay ?? "skip";
-  result.optionsRationale = result.optionsRationale ?? (result.optionsPlay === "execute" ? "IV elevated, strategy aligned" : "Conditions not met for options");
+  // Options: default to execute when IV context is present
+  result.optionsPlay = result.optionsPlay ?? (optOpp && optOpp.expectedValue > 0 ? "execute" : "skip");
+  result.optionsRationale = result.optionsRationale ?? (result.optionsPlay === "execute" ? "EV positive — executing" : "No edge");
 
   return result;
 }
@@ -868,9 +868,9 @@ async function tryPlaceOptionOrder(
   try {
     const expiry = alpaca.getOptionExpiry(optOpp.expDays);
     const optSymbol = alpaca.buildOptionSymbol(underlying, expiry, optOpp.type, optOpp.strike);
-    const contracts = Math.max(1, Math.min(10, Math.floor(
-      parseFloat(agent.maxPositionSize) / (optOpp.premium * 100 * 1.5)
-    )));
+    // No contract limit — size based on Kelly fraction and available capital
+    const optionsCapital = portfolioValue * (optOpp.kellyFraction > 0 ? optOpp.kellyFraction : 0.10);
+    const contracts = Math.max(1, Math.floor(optionsCapital / (optOpp.premium * 100)));
     let alpacaId: string | undefined;
     if (alpaca.isConfigured()) {
       const ao = await alpaca.placeOptionOrder({ symbol: optSymbol, qty: contracts, side: "buy" });
@@ -1019,13 +1019,9 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     } catch { /* none */ }
   }
 
-  // ── Aggressive position sizing — use more of the available capital ──
-  // maxPos from agent settings, but boost it: deploy at least 15% of portfolio per trade
+  // Beast mode: use full portfolio value for sizing decisions
   const portfolioValue = 100000 + parseFloat(agent.totalPnl);
-  const aggressiveMaxPos = Math.max(
-    parseFloat(agent.maxPositionSize),
-    portfolioValue * 0.15   // at least 15% per position
-  );
+  const aggressiveMaxPos = portfolioValue; // no cap — full portfolio available
 
   const fallbackResearch: ResearchOutput = {
     macroRegime: "neutral", sectorStrength: "neutral", earningsRisk: "low",
@@ -1068,7 +1064,9 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     research.macroScore * 0.25 + sentiment.sentimentScore * 0.25 + technical.technicalScore * 0.50
   );
 
-  const maxQty = Math.max(1, Math.floor(aggressiveMaxPos / md.price));
+  // No cap on quantity — let Kelly sizing decide. Paper trading = full exposure.
+  const portfolioValue = 100000 + parseFloat(agent.totalPnl);
+  const maxQty = Math.max(1, Math.floor(portfolioValue / md.price)); // can go all-in
 
   // ── 4a. Compute IV context BEFORE Trader so it can factor in options ─────
   const approxIV = (technical.atrPct / 100) * Math.sqrt(252);

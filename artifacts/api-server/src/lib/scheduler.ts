@@ -4,15 +4,18 @@ import { eq } from "drizzle-orm";
 import { runAgentLogic } from "./agent-engine.js";
 import { logger } from "./logger.js";
 
-// ─── Config ───────────────────────────────────────────────────────────────────
-const INTERVAL_MS = 5 * 60 * 1000; // 5 minutes between runs
-const DAILY_LOSS_LIMIT_PCT = 3.0;  // Stop trading if portfolio down >3% on the day
+// ─── Config — Beast Mode ──────────────────────────────────────
+const INTERVAL_MS = 3 * 60 * 1000; // 3 minutes between runs (was 5 — more active)
 
 let schedulerHandle: ReturnType<typeof setInterval> | null = null;
-let dailyLossLimitHit = false;
-let lastResetDate = new Date().toDateString();
 
-// ─── Market Hours ─────────────────────────────────────────────────────────────
+// ─── Market Hours ─────────────────────────────────────────────
+
+function isDST(date: Date): boolean {
+  const jan = new Date(date.getFullYear(), 0, 1).getTimezoneOffset();
+  const jul = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
+  return date.getTimezoneOffset() < Math.max(jan, jul);
+}
 
 function isMarketOpen(): boolean {
   const now = new Date();
@@ -22,47 +25,25 @@ function isMarketOpen(): boolean {
   const etMins = etHour * 60 + etMin;
   const day    = now.getUTCDay();
   if (day === 0 || day === 6) return false;
-  return etMins >= 570 && etMins < 945; // 9:30–15:45 ET (buffer before close)
+  return etMins >= 570 && etMins < 945; // 9:30–15:45 ET
 }
 
-function isDST(date: Date): boolean {
-  const jan = new Date(date.getFullYear(), 0, 1).getTimezoneOffset();
-  const jul = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
-  return date.getTimezoneOffset() < Math.max(jan, jul);
-}
-
-function resetDailyLimitIfNewDay() {
-  const today = new Date().toDateString();
-  if (today !== lastResetDate) {
-    dailyLossLimitHit = false;
-    lastResetDate = today;
-    logger.info("New trading day — daily loss limit reset");
-  }
-}
-
-// ─── Main loop ────────────────────────────────────────────────────────────────
+// ─── Main loop — No daily loss limit, no external stops ───────
 
 async function runAllActiveAgents() {
-  resetDailyLimitIfNewDay();
-
+  // No daily loss limit check — beast mode runs all day
   if (!isMarketOpen()) {
     logger.debug("Scheduler: market closed, skipping");
     return;
   }
 
-  if (dailyLossLimitHit) {
-    logger.warn("Scheduler: daily loss limit hit — no trading today");
-    return;
-  }
-
   const agents = await db.select().from(agentsTable).where(eq(agentsTable.isActive, true));
-
   if (agents.length === 0) {
     logger.debug("Scheduler: no active agents");
     return;
   }
 
-  logger.info({ count: agents.length }, "Scheduler: running active agents");
+  logger.info({ count: agents.length }, "Scheduler: running active agents — BEAST MODE");
 
   for (const agent of agents) {
     try {
@@ -73,8 +54,12 @@ async function runAllActiveAgents() {
           agentName: agent.name,
           action: result.action,
           orderPlaced: !!result.orderPlaced,
+          optionPlaced: !!result.optionOrderPlaced,
           compositeScore: result.pipeline?.compositeScore,
-          confidence: result.pipeline?.trader.confidence,
+          confidence: result.pipeline?.confidence,
+          ivRank: result.pipeline?.ivRank,
+          ivRegime: result.pipeline?.ivRegime,
+          optionSuggestion: result.pipeline?.optionSuggestion,
         },
         "Scheduler: agent run complete"
       );
@@ -86,12 +71,12 @@ async function runAllActiveAgents() {
 
 export function startScheduler() {
   if (schedulerHandle) return;
-  logger.info({ intervalMs: INTERVAL_MS }, "Aegis scheduler started — 4-agent pipeline active");
+  logger.info({ intervalMs: INTERVAL_MS }, "Aegis BEAST MODE scheduler started — 3min cycles, no limits");
 
-  // First run 30s after startup
+  // First run 15s after startup (was 30s)
   setTimeout(() => {
     runAllActiveAgents().catch(err => logger.error({ err }, "Scheduler: initial run failed"));
-  }, 30_000);
+  }, 15_000);
 
   schedulerHandle = setInterval(() => {
     runAllActiveAgents().catch(err => logger.error({ err }, "Scheduler: interval run failed"));
