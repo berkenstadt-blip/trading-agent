@@ -60,6 +60,7 @@ async function runAllActiveAgents() {
           ivRank: result.pipeline?.ivRank,
           ivRegime: result.pipeline?.ivRegime,
           optionSuggestion: result.pipeline?.optionSuggestion,
+          positionsActive: result.pipeline?.positionsActive,
         },
         "Scheduler: agent run complete"
       );

@@ -38,6 +38,7 @@ import {
 import { findBestOpportunity, SymbolScan, ALL_SYMBOLS } from "./scanner.js";
 import { getSocialSentiment, SocialSentimentResult } from "./social-sentiment.js";
 import { getSymbolIntelligence, formatIntelligenceForPrompt, SymbolIntelligence } from "./data-feeds.js";
+import { analyzeEarningsPlay, EarningsPlay } from "./earnings-plays.js";
 
 import {
   blackScholes, analyzeIV, findBestOptionStrategy, IVContext, OptionOpportunity,
@@ -86,8 +87,9 @@ export interface AgentRunResult {
   pipeline?: {
     scanGrade: string; compositeScore: number;
     confidence: number; kellyF: number;
-    circuitBreaker: string; optionSuggestion?: string;
+    circuitBreaker: string; optionSuggestion?: string; earningsPlay?: string;
     ivRank?: number; ivRegime?: string;
+    positionsActive?: number;
   };
 }
 
@@ -792,6 +794,7 @@ async function runTrader(
   maxQty: number, compositeScore: number,
   ivCtx: IVContext,
   optOpp: OptionOpportunity | null,
+  existingPositionSymbols: string[] = [],
 ): Promise<TraderDecision> {
 
   // Compute unrealized P&L context for existing position
@@ -891,6 +894,7 @@ THIS IS REAL MONEY. Expected value wins long-term. Think asymmetry. Protect capi
 
 TICKER: ${symbol}
 PRICE: $${md.price.toFixed(2)} | ${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}% today
+PORTFOLIO: ${existingPositionSymbols.length}/5 positions active: ${existingPositionSymbols.join(', ') || 'none'}
 ${posContext}
 STRATEGY: ${agent.strategy.toUpperCase()} | RISK LEVEL: ${agent.riskLevel.toUpperCase()}
 MAX SHARES: ${maxQty} | MAX POSITION: $${parseFloat(agent.maxPositionSize).toFixed(0)}
@@ -1093,6 +1097,12 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
 
   // ── 0b. Get existing positions ───────────────────────────
   const existingPositionSymbols: string[] = [];
+  if (alpaca.isConfigured()) {
+    try {
+      const positions = await alpaca.getPositions();
+      for (const p of positions) existingPositionSymbols.push(p.symbol);
+    } catch { /* ignore */ }
+  }
   let existingPos: { qty: number; avgCost: number } | null = null;
 
   // ── 0c. Circuit breaker check ────────────────────────────
@@ -1119,6 +1129,11 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
   if (breaker.halt) {
     return { action: "no_signal", analysis: `Circuit breaker: ${breaker.reason}`, orderPlaced: null,
              pipeline: { scanGrade: "N/A", compositeScore: 0, confidence: 0, kellyF: 0, circuitBreaker: breaker.reason } };
+  }
+
+  // ── 0d. Portfolio heat check ──────────────────────────────
+  if (existingPositionSymbols.length >= 5) {
+    return { action: 'no_signal', analysis: 'Max positions reached (5). Waiting for exits.', orderPlaced: null };
   }
 
   // ── 1. Scanner: find best opportunity ────────────────────
@@ -1220,7 +1235,7 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
   const optDirection = compositeScore > 20 ? "bullish" : compositeScore < -20 ? "bearish" : "neutral";
   const optOpp: OptionOpportunity | null = findBestOptionStrategy(md.price, approxIV, ivCtx, optDirection) ?? null;
 
-  const trader = await runTrader(agent, symbol, md, research, sentiment, technical, existingPos, maxQty, compositeScore, ivCtx, optOpp)
+  const trader = await runTrader(agent, symbol, md, research, sentiment, technical, existingPos, maxQty, compositeScore, ivCtx, optOpp, existingPositionSymbols)
     .catch(err => ({
       action: "hold" as const, quantity: 1, confidence: 0,
       stopLossPct: 2, takeProfitPct: 4, riskRewardRatio: 2, positionSizePct: 50,
@@ -1239,6 +1254,15 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
   // ── 5. Options suggestion text ───────────────────────────
   const optionSuggestion = optOpp ? `${optOpp.strategy}: ${optOpp.rationale}` : undefined;
 
+  // ── 5b. Earnings play scan — buy cheap IV before earnings ──
+  let earningsPlay: EarningsPlay | null = null;
+  try {
+    earningsPlay = await analyzeEarningsPlay(symbol, md.price, approxIV, compositeScore);
+    if (earningsPlay) {
+      logger.info({ symbol, earningsPlay }, "Earnings play identified");
+    }
+  } catch { /* optional */ }
+
   const analysis = `[${trader.confidence}% conf | Score: ${compositeScore} | ${scanResult?.grade ?? "N/A"}] ${trader.reasoning}`;
 
   const pipeline = {
@@ -1248,6 +1272,8 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     ...(optionSuggestion ? { optionSuggestion } : {}),
     ivRank: ivCtx.ivRank,
     ivRegime: ivCtx.regime,
+    ...(earningsPlay ? { earningsPlay: earningsPlay.rationale } : {}),
+    positionsActive: existingPositionSymbols.length,
   };
 
   // ── 6. Execute ───────────────────────────────────────────

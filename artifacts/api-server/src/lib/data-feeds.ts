@@ -1,15 +1,13 @@
 /**
  * ═══════════════════════════════════════════════════════════════
- *  AEGIS DATA FEEDS — Free Real-Time Market Intelligence
- *  No API keys needed for most sources.
+ *  AEGIS DATA FEEDS — Institutional Market Intelligence
  *
  *  Sources:
- *  - FRED API (Federal Reserve Economic Data) — macro real data
- *  - Alpha Vantage — earnings calendar, fundamentals (free tier)
- *  - OpenInsider — SEC Form 4 insider transactions
- *  - Finviz — short interest, analyst ratings (scraping)
- *  - StockAnalysis — earnings dates (scraping)
- *  - Yahoo Finance (unofficial) — fallback fundamentals
+ *  - FRED API — real Fed rate, CPI, yield curve (free)
+ *  - Alpha Vantage — earnings calendar, EPS data (ALPHA_VANTAGE_API_KEY)
+ *  - Firecrawl — fast scraping: Finviz, OpenInsider, Benzinga (FIRECRAWL_API_KEY)
+ *  - OpenInsider — SEC Form 4 insider transactions (free fallback)
+ *  - Yahoo Finance — analyst targets, fundamentals (free fallback)
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -104,11 +102,65 @@ async function safeFetch<T>(url: string, opts?: RequestInit): Promise<T | null> 
   }
 }
 
+/**
+ * Firecrawl scrape — bypasses bot detection on Finviz, Benzinga, etc.
+ * Falls back to raw fetch if FIRECRAWL_API_KEY not set.
+ */
+async function firecrawlScrape(url: string): Promise<string | null> {
+  const key = process.env.FIRECRAWL_API_KEY;
+  if (!key) return null;
+  try {
+    const res = await fetch("https://api.firecrawl.dev/v1/scrape", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url,
+        formats: ["markdown"],
+        onlyMainContent: true,
+        timeout: 15000,
+      }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { success: boolean; data?: { markdown?: string } };
+    return data?.data?.markdown ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch raw HTML with browser-like headers
+ */
+async function fetchHtml(url: string, extraHeaders?: Record<string, string>): Promise<string> {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/",
+        ...extraHeaders,
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!res.ok) return "";
+    return await res.text();
+  } catch {
+    return "";
+  }
+}
+
 // ─── FRED API — Real macro data from Federal Reserve ─────────
 // No key needed for most series. FRED_API_KEY env var for higher limits.
 
 const FRED_BASE = "https://api.stlouisfed.org/fred/series/observations";
 const FRED_KEY  = process.env.FRED_API_KEY ?? ""; // optional — public data works without it
+const AV_KEY    = process.env.ALPHA_VANTAGE_API_KEY ?? "103IXR0IRNPQYRSO"; // Alpha Vantage
+// Note: FIRECRAWL_API_KEY is read via process.env inside firecrawlScrape()
 
 async function fredLatest(seriesId: string): Promise<number | null> {
   const url = `${FRED_BASE}?series_id=${seriesId}&limit=1&sort_order=desc&file_type=json${FRED_KEY ? `&api_key=${FRED_KEY}` : ""}`;
@@ -183,10 +235,9 @@ export async function getEarningsInfo(symbol: string): Promise<EarningsInfo> {
     };
 
     // Try Alpha Vantage earnings (free tier — 500 calls/day)
-    const avKey = process.env.ALPHA_VANTAGE_API_KEY;
-    if (avKey) {
+    if (AV_KEY) {
       try {
-        const url = `https://www.alphavantage.co/query?function=EARNINGS&symbol=${symbol}&apikey=${avKey}`;
+        const url = `https://www.alphavantage.co/query?function=EARNINGS&symbol=${symbol}&apikey=${AV_KEY}`;
         const data = await safeFetch<{
           annualEarnings?: unknown[];
           quarterlyEarnings?: { fiscalDateEnding: string; reportedDate: string; reportedEPS: string; estimatedEPS: string; surprise: string; surprisePercentage: string }[];
@@ -260,12 +311,10 @@ export async function getInsiderActivity(symbol: string): Promise<InsiderActivit
     };
 
     try {
-      // OpenInsider CSV endpoint — last 6 months
-      const url = `http://openinsider.com/screener?s=${symbol}&fd=-180&td=0&fmt=json`;
-      const html = await fetch(url, {
-        headers: { "User-Agent": "Mozilla/5.0" },
-        signal: AbortSignal.timeout(8000),
-      }).then(r => r.text()).catch(() => "");
+      // Try Firecrawl first for OpenInsider (better parsing)
+      const url = `https://openinsider.com/screener?s=${symbol}&fd=-180&td=0&fmt=json`;
+      let html = await firecrawlScrape(url);
+      if (!html) html = await fetchHtml(url);
 
       // Parse the JSON table from the HTML response
       const tableMatch = html.match(/\[.*?\]/s);
@@ -318,34 +367,31 @@ export async function getInsiderActivity(symbol: string): Promise<InsiderActivit
 // ─── Short Interest — Finviz (free scraping) ─────────────────
 
 export async function getShortData(symbol: string): Promise<ShortData> {
-  return cached(`short_${symbol}`, 24 * 60 * 60 * 1000, async () => { // cache 24h
+  return cached(`short_${symbol}`, 24 * 60 * 60 * 1000, async () => {
     const base: ShortData = { symbol, shortFloat: null, shortRatio: null, shortInterest: null, signal: "unknown" };
+    const url = `https://finviz.com/quote.ashx?t=${symbol}&ty=c&p=d&b=1`;
 
     try {
-      const url = `https://finviz.com/quote.ashx?t=${symbol}&ty=c&p=d&b=1`;
-      const html = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          "Referer": "https://finviz.com/",
-        },
-        signal: AbortSignal.timeout(10000),
-      }).then(r => r.text()).catch(() => "");
+      // Try Firecrawl first (bypasses Finviz bot detection reliably)
+      let html = await firecrawlScrape(url);
+      // Fallback to raw fetch with browser headers
+      if (!html) html = await fetchHtml(url, { "Referer": "https://finviz.com/" });
+      if (!html) return base;
 
-      // Extract Short Float % from Finviz HTML
-      const shortFloatMatch  = html.match(/Short Float.*?(\d+\.?\d*)%/i);
-      const shortRatioMatch  = html.match(/Short Ratio.*?(\d+\.?\d*)/i);
-      const shortInterestMatch = html.match(/Short Interest.*?([\d,]+)/i);
+      const shortFloatMatch    = html.match(/Short Float[^%\d]*(\d+\.?\d*)%/i);
+      const shortRatioMatch    = html.match(/Short Ratio[^\d]*(\d+\.?\d*)/i);
+      const shortInterestMatch = html.match(/Short Interest[^\d]*([\d,]+)/i);
 
-      const shortFloat  = shortFloatMatch  ? parseFloat(shortFloatMatch[1])  : null;
-      const shortRatio  = shortRatioMatch  ? parseFloat(shortRatioMatch[1])  : null;
+      const shortFloat       = shortFloatMatch  ? parseFloat(shortFloatMatch[1])  : null;
+      const shortRatio       = shortRatioMatch  ? parseFloat(shortRatioMatch[1])  : null;
       const shortInterestRaw = shortInterestMatch ? parseInt(shortInterestMatch[1].replace(/,/g, "")) : null;
 
       const signal: ShortData["signal"] =
-        shortFloat !== null ?
-          shortFloat > 20 ? "high" :
-          shortFloat > 10 ? "medium" : "low"
-        : "unknown";
+        shortFloat !== null
+          ? shortFloat > 20 ? "high" : shortFloat > 10 ? "medium" : "low"
+          : "unknown";
 
+      logger.info({ symbol, shortFloat, shortRatio, signal }, "Short data fetched");
       return { symbol, shortFloat, shortRatio, shortInterest: shortInterestRaw, signal };
     } catch (e) {
       logger.warn({ e, symbol }, "Short data fetch failed");

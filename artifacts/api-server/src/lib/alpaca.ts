@@ -177,6 +177,18 @@ export function getIntradayBars(symbol: string, limit = 78): Promise<AlpacaBar[]
   return alpacaFetch<BarsResponse>(url).then(r => r.bars ?? []);
 }
 
+/** Fetch 1-minute bars for precise intraday entry timing */
+export function get1MinBars(symbol: string, limit = 30): Promise<AlpacaBar[]> {
+  const url = `${DATA_URL}/stocks/${symbol.toUpperCase()}/bars?timeframe=1Min&limit=${limit}&feed=iex&sort=asc`;
+  return alpacaFetch<BarsResponse>(url).then(r => r.bars ?? []);
+}
+
+/** Fetch 15-minute bars for swing trade analysis */
+export function get15MinBars(symbol: string, limit = 50): Promise<AlpacaBar[]> {
+  const url = `${DATA_URL}/stocks/${symbol.toUpperCase()}/bars?timeframe=15Min&limit=${limit}&feed=iex&sort=asc`;
+  return alpacaFetch<BarsResponse>(url).then(r => r.bars ?? []);
+}
+
 // ─── News / Sentiment ────────────────────────────────────────────────────────
 
 export interface AlpacaNewsArticle {
