@@ -1379,11 +1379,14 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     positionsActive: existingPositionSymbols.length,
   };
 
-  // ── 6. Execute ───────────────────────────────────────────
+  // Only trade options on A/A+ setups — quality over quantity
+  const optGrade = scanResult?.grade ?? "B";
+  const shouldTradeOptions = optGrade === "A+" || optGrade === "A" || compositeScore > 15 || compositeScore < -15;
+
   // OPTIONS FIRST — execute on every cycle whenever optOpp exists (primary profit driver)
   // Run options regardless of stock action (buy/sell/hold)
   let optResGlobal: NonNullable<AgentRunResult["optionOrderPlaced"]> | null = null;
-  if (optOpp) {
+  if (optOpp && shouldTradeOptions) {
     optResGlobal = await tryPlaceOptionOrder(agent, symbol, optOpp, trader, md.price, analysis, aggressiveMaxPos);
   }
 
