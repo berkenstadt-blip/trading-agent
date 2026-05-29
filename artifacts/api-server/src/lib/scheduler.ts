@@ -6,7 +6,7 @@ import { runRiskManagement } from "./execution-risk-manager.js";
 import { logger } from "./logger.js";
 
 // ─── Config — Beast Mode ──────────────────────────────────────
-const INTERVAL_MS = 15 * 60 * 1000; // 15 minutes — reduces OpenRouter costs 5x
+const INTERVAL_MS = 30 * 60 * 1000; // 30 minutes — max cost reduction
 
 let schedulerHandle: ReturnType<typeof setInterval> | null = null;
 
@@ -50,7 +50,7 @@ async function runAllActiveAgents() {
   const rest = allAgents.filter(a => !PRIORITY.includes(a.name));
   // Pick 1 random non-priority agent per cycle to rotate coverage
   const tickIdx = Math.floor(Date.now() / INTERVAL_MS) % Math.max(1, rest.length);
-  const agents = [...priority, ...(rest[tickIdx] ? [rest[tickIdx]] : [])].slice(0, 4);
+  const agents = [...priority, ...(rest[tickIdx] ? [rest[tickIdx]] : [])].slice(0, 2); // max 2 agents/tick = 8 LLM calls/hr vs 32
 
   logger.info({ count: agents.length, names: agents.map((a: any) => a.name) }, "Scheduler: running agents (cost-optimized)");
 

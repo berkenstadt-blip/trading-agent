@@ -47,7 +47,7 @@ import {
 
 // ─── OpenRouter client ────────────────────────────────────────
 // Two models: heavy (70B) for research/sentiment quality, fast (8B) for trader speed
-const MODEL_HEAVY = "nousresearch/hermes-3-llama-3.1-70b"; // research + sentiment — quality matters
+const MODEL_HEAVY = "nousresearch/hermes-3-llama-3.1-8b"; // all agents on 8B — 10x cheaper
 const MODEL_FAST  = "nousresearch/hermes-3-llama-3.1-8b";  // trader decision — fast + cheap
 const MAX_TOKENS_RESEARCH  = 400;
 const MAX_TOKENS_SENTIMENT = 300;
@@ -1192,10 +1192,10 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     symbol = scanResult.symbol;
     logger.info({ symbol, grade: scanResult.grade, score: scanResult.technicalScore, iv: scanResult.approxIV }, "Scanner picked symbol");
   } else {
-    // Fallback: pick from high-liquidity universe randomly
-    const fallbacks = ["AAPL","MSFT","NVDA","AMD","SPY","QQQ","META","TSLA"];
-    symbol = fallbacks[Math.floor(Date.now() / 300_000) % fallbacks.length];
-    logger.info({ symbol }, "No A/A+ signal, using high-liquidity fallback");
+    // NO A/A+ signal — skip LLM entirely to save cost
+    logger.info({ grade: scanResult?.grade ?? "none" }, "No A/A+ signal — skipping LLM cycle to save cost");
+    return { action: "no_signal", analysis: "No A/A+ setup found — skipped LLM to save cost.", orderPlaced: null,
+             pipeline: { scanGrade: scanResult?.grade ?? "none", compositeScore: scanResult?.technicalScore ?? 0, confidence: 0, kellyF: 0, circuitBreaker: "" } };
   }
 
   // ── 2. Fetch full market data ─────────────────────────────
