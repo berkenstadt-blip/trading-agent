@@ -266,17 +266,19 @@ export interface AlpacaOptionOrderParams {
   limit_price?: string;
 }
 
-/** Place an options order via Alpaca (paper trading supports options) */
+/** Place an options order via Alpaca (paper trading requires limit orders for options) */
 export function placeOptionOrder(params: AlpacaOptionOrderParams) {
+  // Alpaca paper requires limit orders for options — use slightly above mid as limit price
+  const limitPrice = params.limit_price ?? (params.limit_price);
   return alpacaFetch<AlpacaOrder>(`${BASE_URL}/orders`, {
     method: "POST",
     body: JSON.stringify({
       symbol: params.symbol,
       qty: params.qty,
       side: params.side,
-      type: params.type ?? "market",
-      time_in_force: params.time_in_force ?? "day",
-      ...(params.limit_price ? { limit_price: params.limit_price } : {}),
+      type: "limit",
+      time_in_force: "day",
+      limit_price: limitPrice,
     }),
   });
 }

@@ -1026,7 +1026,12 @@ async function tryPlaceOptionOrder(
     let orderStatus = "simulated"; // default simulated — Alpaca paper doesn't support options without approval
     if (alpaca.isConfigured()) {
       try {
-        const ao = await alpaca.placeOptionOrder({ symbol: optSymbol, qty: contracts, side: "buy" });
+        const ao = await alpaca.placeOptionOrder({ 
+          symbol: optSymbol, 
+          qty: contracts, 
+          side: "buy",
+          limit_price: (optOpp.premium * 1.05).toFixed(2), // 5% above mid to ensure fill
+        });
         alpacaId = ao.id;
         orderStatus = "filled";
       } catch (optErr: any) {
