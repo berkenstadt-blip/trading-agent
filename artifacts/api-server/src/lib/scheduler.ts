@@ -11,34 +11,20 @@ let schedulerHandle: ReturnType<typeof setInterval> | null = null;
 
 // ─── Market Hours ─────────────────────────────────────────────
 
-function isDST(date: Date): boolean {
-  // Reliable DST check for US Eastern — works even on UTC servers (Replit)
-  // US DST: second Sunday of March → first Sunday of November
-  const year = date.getUTCFullYear();
-
-  // Second Sunday of March at 2 AM ET (= 7 AM UTC)
-  const marchFirst   = new Date(Date.UTC(year, 2, 1));
-  const marchDay     = marchFirst.getUTCDay(); // 0=Sun
-  const firstSunMarch = marchDay === 0 ? 1 : 8 - marchDay;
-  const dstStart     = new Date(Date.UTC(year, 2, firstSunMarch + 7, 7)); // 2 AM ET = 7 UTC
-
-  // First Sunday of November at 2 AM ET (= 6 AM UTC, already back to EST)
-  const novFirst  = new Date(Date.UTC(year, 10, 1));
-  const novDay    = novFirst.getUTCDay();
-  const firstSunNov = novDay === 0 ? 1 : 8 - novDay;
-  const dstEnd    = new Date(Date.UTC(year, 10, firstSunNov, 6)); // 2 AM ET = 6 UTC
-
-  return date >= dstStart && date < dstEnd;
-}
-
 function isMarketOpen(): boolean {
   const now = new Date();
-  const etOffset = isDST(now) ? -4 : -5;
-  const etHour = (now.getUTCHours() + 24 + etOffset) % 24;
-  const etMin  = now.getUTCMinutes();
-  const etMins = etHour * 60 + etMin;
-  const day    = now.getUTCDay();
+  const day = now.getUTCDay();
   if (day === 0 || day === 6) return false;
+
+  // Use Intl to get actual ET time — handles DST automatically, works on UTC servers
+  const etTime = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric", minute: "numeric", hour12: false,
+  }).formatToParts(now);
+  const etHour = parseInt(etTime.find(p => p.type === "hour")!.value, 10);
+  const etMin  = parseInt(etTime.find(p => p.type === "minute")!.value, 10);
+  const etMins = etHour * 60 + etMin;
+
   return etMins >= 570 && etMins < 945; // 9:30–15:45 ET
 }
 
