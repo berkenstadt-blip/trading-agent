@@ -901,7 +901,7 @@ THIS IS REAL MONEY. Expected value wins long-term. Think asymmetry. Protect capi
 
 TICKER: ${symbol}
 PRICE: $${md.price.toFixed(2)} | ${md.changePercent >= 0 ? "+" : ""}${md.changePercent.toFixed(2)}% today
-PORTFOLIO: ${existingPositionSymbols.length}/5 positions active: ${existingPositionSymbols.join(', ') || 'none'}
+PORTFOLIO: ${existingPositionSymbols.length} positions active (NO LIMIT — Beast Mode): ${existingPositionSymbols.join(', ') || 'none'}
 ${posContext}
 STRATEGY: ${agent.strategy.toUpperCase()} | RISK LEVEL: ${agent.riskLevel.toUpperCase()}
 MAX SHARES: ${maxQty} | MAX POSITION: $${parseFloat(agent.maxPositionSize).toFixed(0)}
@@ -1140,10 +1140,8 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
              pipeline: { scanGrade: "N/A", compositeScore: 0, confidence: 0, kellyF: 0, circuitBreaker: breaker.reason } };
   }
 
-  // ── 0d. Portfolio heat check ──────────────────────────────
-  if (existingPositionSymbols.length >= 5) {
-    return { action: 'no_signal', analysis: 'Max positions reached (5). Waiting for exits.', orderPlaced: null };
-  }
+  // ── 0d. Portfolio heat check — NO POSITION LIMIT (Beast Mode) ───────────
+  // No cap — hold as many positions as the market gives us signals for.
 
   // ── 1. Scanner: find best opportunity ────────────────────
   const maxPos = parseFloat(agent.maxPositionSize);
