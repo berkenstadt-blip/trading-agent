@@ -1187,9 +1187,18 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     } catch { /* none */ }
   }
 
-  // Beast mode: use full portfolio value for sizing decisions
-  const portfolioValue = 100000 + parseFloat(agent.totalPnl);
-  const aggressiveMaxPos = portfolioValue; // no cap — full portfolio available
+  // Use REAL buying power from Alpaca — never spend more than available cash
+  let portfolioValue = 100000 + parseFloat(agent.totalPnl);
+  let availableCash = portfolioValue * 0.95; // conservative default
+  if (alpaca.isConfigured()) {
+    try {
+      const account = await alpaca.getAccount();
+      portfolioValue = parseFloat(account.equity || account.portfolio_value);
+      availableCash = parseFloat(account.buying_power);
+    } catch { /* use defaults */ }
+  }
+  // Cap position size to available cash — never go negative
+  const aggressiveMaxPos = Math.max(0, availableCash * 0.30); // max 30% of available cash per trade
 
   const fallbackResearch: ResearchOutput = {
     macroRegime: "neutral", sectorStrength: "neutral", earningsRisk: "low",
