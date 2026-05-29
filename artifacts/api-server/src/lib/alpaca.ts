@@ -14,6 +14,19 @@ function headers() {
 
 export function isConfigured() { return true; }
 
+// ─── Real price cache — survives rate limits ──────────────────
+// When Alpaca 429s, return last known REAL price instead of falling to synthetic garbage
+const realPriceCache = new Map<string, { price: number; ts: number; source: string }>();
+export function cacheRealPrice(symbol: string, price: number, source = "alpaca") {
+  if (price > 0) realPriceCache.set(symbol.toUpperCase(), { price, ts: Date.now(), source });
+}
+export function getCachedPrice(symbol: string): number | null {
+  const hit = realPriceCache.get(symbol.toUpperCase());
+  // Use cache up to 30 minutes old
+  if (hit && Date.now() - hit.ts < 30 * 60 * 1000) return hit.price;
+  return null;
+}
+
 async function alpacaFetch<T>(url: string, init?: RequestInit, retries = 3): Promise<T> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const res = await fetch(url, { ...init, headers: { ...headers(), ...(init?.headers ?? {}) } });

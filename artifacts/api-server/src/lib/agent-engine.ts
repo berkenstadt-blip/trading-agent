@@ -46,12 +46,13 @@ import {
 } from "./options-engine.js";
 
 // ─── OpenRouter client ────────────────────────────────────────
-// Cost-optimized: use fast cheap model, reduce tokens aggressively
-const MODEL = "nousresearch/hermes-3-llama-3.1-8b"; // 8B — 10x cheaper than 70B, still excellent for trading signals
-const MAX_TOKENS_RESEARCH  = 250; // was 600
-const MAX_TOKENS_SENTIMENT = 200; // was 600
-const MAX_TOKENS_STRATEGY  = 250; // was 600
-const MAX_TOKENS_TRADER    = 400; // was 900
+// Two models: heavy (70B) for research/sentiment quality, fast (8B) for trader speed
+const MODEL_HEAVY = "nousresearch/hermes-3-llama-3.1-70b"; // research + sentiment — quality matters
+const MODEL_FAST  = "nousresearch/hermes-3-llama-3.1-8b";  // trader decision — fast + cheap
+const MAX_TOKENS_RESEARCH  = 400;
+const MAX_TOKENS_SENTIMENT = 300;
+const MAX_TOKENS_STRATEGY  = 350;
+const MAX_TOKENS_TRADER    = 500;
 
 let _client: OpenAI | null = null;
 function getClient(): OpenAI {
@@ -70,9 +71,9 @@ function isLLMConfigured(): boolean {
   return !!(process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY);
 }
 
-async function llmJSON<T>(system: string, user: string, maxTokens = MAX_TOKENS_RESEARCH): Promise<T> {
+async function llmJSON<T>(system: string, user: string, maxTokens = MAX_TOKENS_RESEARCH, model = MODEL_HEAVY): Promise<T> {
   const resp = await getClient().chat.completions.create({
-    model: MODEL, max_completion_tokens: maxTokens, temperature: 0.1,
+    model, max_completion_tokens: maxTokens, temperature: 0.1,
     messages: [{ role: "system", content: system }, { role: "user", content: user }],
   });
   const raw = resp.choices[0]?.message?.content ?? "{}";
@@ -219,7 +220,21 @@ async function fetchMarketData(symbol: string): Promise<MarketData> {
       high = snap.dailyBar?.h ?? price; low = snap.dailyBar?.l ?? price;
       open = snap.dailyBar?.o ?? price; volume = snap.dailyBar?.v ?? 0;
       source = "alpaca";
-    } catch (e) { logger.warn({ e, symbol }, "Snapshot failed"); }
+      // Cache the real price so rate limit fallbacks use it
+      alpaca.cacheRealPrice(symbol, price);
+    } catch (e) {
+      // Try cache before falling to synthetic
+      const cached = alpaca.getCachedPrice(symbol);
+      if (cached) {
+        price = cached; prevClose = cached * 0.99; source = "alpaca";
+        change = +(price - prevClose).toFixed(4);
+        changePercent = +((change / prevClose) * 100).toFixed(4);
+        high = price * 1.005; low = price * 0.995; open = prevClose; volume = 1000000;
+        logger.info({ symbol, price, source: "cache" }, "Using cached price — Alpaca rate limited");
+      } else {
+        logger.warn({ e, symbol }, "Snapshot failed — no cache, using synthetic");
+      }
+    }
 
     try {
       const rawBars = await alpaca.getDailyBars(symbol, 60);
@@ -778,7 +793,7 @@ Sentiment: ${sentiment.overallSentiment.toUpperCase()} (${sentiment.sentimentSco
 Catalysts: ${research.catalysts.join(" | ") || "none"}
 Squeeze Risk: ${sentiment.shortSqueezeRisk ? "🔥 YES" : "no"} | Catalyst Imminent: ${sentiment.catalystImminent ? "⚠️ YES" : "no"}
 
-Grade this setup. Find the entry. Be specific.`, 700
+Grade this setup. Find the entry. Be specific.`, MAX_TOKENS_STRATEGY, MODEL_FAST
   );
 
   return {
@@ -968,7 +983,7 @@ BEST OPTIONS STRATEGY — INSTITUTIONAL ANALYSIS:
   → EXECUTE if: EV > 0, PoP > 65%, IV rank aligns (credit: >40, debit: <35), no earnings in 7 days
   → SKIP if: EV negative, IV misaligned, earnings risk, or directional conflict` : "No options opportunity identified — optionsPlay = skip."}
 
-Make your final decision. Stock action + options play. This is real capital. Think expected value.`, MAX_TOKENS_TRADER
+Make your final decision. Stock action + options play. This is real capital. Think expected value.`, MAX_TOKENS_TRADER, MODEL_FAST
   );
 
   // ─── Beast Mode Guardrails — minimal, only prevent invalid states ──────────

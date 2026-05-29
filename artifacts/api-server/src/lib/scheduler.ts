@@ -2,6 +2,7 @@ import { db } from "@workspace/db";
 import { agentsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { runAgentLogic } from "./agent-engine.js";
+import { runRiskManagement } from "./execution-risk-manager.js";
 import { logger } from "./logger.js";
 
 // ─── Config — Beast Mode ──────────────────────────────────────
@@ -51,7 +52,20 @@ async function runAllActiveAgents() {
   const tickIdx = Math.floor(Date.now() / INTERVAL_MS) % Math.max(1, rest.length);
   const agents = [...priority, ...(rest[tickIdx] ? [rest[tickIdx]] : [])].slice(0, 4);
 
-  logger.info({ count: agents.length, names: agents.map(a => a.name) }, "Scheduler: running agents (cost-optimized)");
+  logger.info({ count: agents.length, names: agents.map((a: any) => a.name) }, "Scheduler: running agents (cost-optimized)");
+
+  // ── RISK MANAGEMENT FIRST — stop losses, take profits, option lifecycle ──
+  const riskResult = await runRiskManagement().catch(e => {
+    logger.error({ e: e.message }, "Risk management failed");
+    return { halted: false, closedPositions: [], closedOptions: [] };
+  });
+
+  if (riskResult.halted) {
+    logger.warn({ reason: riskResult.haltReason }, "CIRCUIT BREAKER — skipping agent runs this cycle");
+    return;
+  }
+
+  // ── AGENT LOGIC ──
 
   for (const agent of agents) {
     try {
