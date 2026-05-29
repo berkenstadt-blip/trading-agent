@@ -5,7 +5,7 @@ import { runAgentLogic } from "./agent-engine.js";
 import { logger } from "./logger.js";
 
 // ─── Config — Beast Mode ──────────────────────────────────────
-const INTERVAL_MS = 3 * 60 * 1000; // 3 minutes between runs (was 5 — more active)
+const INTERVAL_MS = 15 * 60 * 1000; // 15 minutes — reduces OpenRouter costs 5x
 
 let schedulerHandle: ReturnType<typeof setInterval> | null = null;
 
@@ -28,22 +28,30 @@ function isMarketOpen(): boolean {
   return etMins >= 570 && etMins < 945; // 9:30–15:45 ET
 }
 
-// ─── Main loop — No daily loss limit, no external stops ───────
+// ─── Main loop — cost-optimized: max 3 agents per tick ────────
 
 async function runAllActiveAgents() {
-  // No daily loss limit check — beast mode runs all day
   if (!isMarketOpen()) {
     logger.debug("Scheduler: market closed, skipping");
     return;
   }
 
-  const agents = await db.select().from(agentsTable).where(eq(agentsTable.isActive, true));
-  if (agents.length === 0) {
+  const allAgents = await db.select().from(agentsTable).where(eq(agentsTable.isActive, true));
+  if (allAgents.length === 0) {
     logger.debug("Scheduler: no active agents");
     return;
   }
 
-  logger.info({ count: agents.length }, "Scheduler: running active agents — BEAST MODE");
+  // Cost optimization: rotate through agents, max 3 per cycle
+  // Priority: Options Hunter, Earnings Sniper, Volatility Crusher first
+  const PRIORITY = ["Options Hunter", "Earnings Sniper", "Volatility Crusher"];
+  const priority = allAgents.filter(a => PRIORITY.includes(a.name));
+  const rest = allAgents.filter(a => !PRIORITY.includes(a.name));
+  // Pick 1 random non-priority agent per cycle to rotate coverage
+  const tickIdx = Math.floor(Date.now() / INTERVAL_MS) % Math.max(1, rest.length);
+  const agents = [...priority, ...(rest[tickIdx] ? [rest[tickIdx]] : [])].slice(0, 4);
+
+  logger.info({ count: agents.length, names: agents.map(a => a.name) }, "Scheduler: running agents (cost-optimized)");
 
   for (const agent of agents) {
     try {
