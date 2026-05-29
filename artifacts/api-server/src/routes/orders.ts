@@ -56,24 +56,53 @@ function alpacaStatusToLocal(status: string): string {
 }
 
 router.get("/", async (req, res) => {
+  const status = req.query.status as string | undefined;
+  const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+
+  // Always fetch from DB first (includes simulated options)
+  let dbOrders: any[] = [];
+  try {
+    const dbResults = status && status !== "all"
+      ? await db.select().from(ordersTable).where(eq(ordersTable.status, status)).orderBy(desc(ordersTable.createdAt)).limit(limit)
+      : await db.select().from(ordersTable).orderBy(desc(ordersTable.createdAt)).limit(limit);
+    dbOrders = dbResults.map(o => ({
+      id: String(o.id),
+      symbol: o.symbol,
+      assetType: o.assetType,
+      side: o.side,
+      orderType: o.orderType,
+      quantity: parseFloat(o.quantity),
+      limitPrice: o.limitPrice ? parseFloat(o.limitPrice) : null,
+      stopPrice: o.stopPrice ? parseFloat(o.stopPrice) : null,
+      filledPrice: o.filledPrice ? parseFloat(o.filledPrice) : null,
+      status: o.status,
+      agentId: o.agentId,
+      agentName: o.agentName,
+      reason: o.reason,
+      optionType: o.optionType,
+      strikePrice: o.strikePrice ? parseFloat(o.strikePrice) : null,
+      expirationDate: o.expirationDate,
+      createdAt: o.createdAt,
+      filledAt: o.filledAt,
+      alpacaId: null,
+    }));
+  } catch (err: any) {
+    req.log.warn({ err }, "DB orders fetch failed");
+  }
+
+  // Also try Alpaca for real stock orders (skip on failure)
   if (alpaca.isConfigured()) {
     try {
-      const status = req.query.status as string | undefined;
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
-
-      // Map our statuses to Alpaca statuses
       let alpacaStatus = "all";
       if (status === "filled") alpacaStatus = "closed";
       else if (status === "pending") alpacaStatus = "open";
       else if (status === "cancelled") alpacaStatus = "closed";
 
       const orders = await alpaca.getOrders({ status: alpacaStatus, limit: Math.min(limit, 500), direction: "desc" });
-
-      const mapped = orders
+      const alpacaMapped = orders
         .filter(o => {
           if (!status || status === "all") return true;
-          const local = alpacaStatusToLocal(o.status);
-          return local === status;
+          return alpacaStatusToLocal(o.status) === status;
         })
         .slice(0, limit)
         .map(o => ({
@@ -98,23 +127,18 @@ router.get("/", async (req, res) => {
           alpacaId: o.id,
         }));
 
-      res.json(mapped);
+      // Merge: DB orders + Alpaca orders, deduplicate by symbol+side+createdAt proximity
+      const combined = [...dbOrders, ...alpacaMapped]
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        .slice(0, limit);
+      res.json(combined);
       return;
     } catch (err: any) {
-      req.log.warn({ err }, "Alpaca orders fetch failed, falling back to DB");
+      req.log.warn({ err }, "Alpaca orders fetch failed, using DB only");
     }
   }
 
-  // Fallback: local DB
-  const status = req.query.status as string | undefined;
-  const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
-  if (status && status !== "all") {
-    const results = await db.select().from(ordersTable).where(eq(ordersTable.status, status)).orderBy(desc(ordersTable.createdAt)).limit(limit);
-    res.json(results.map(serializeOrder));
-    return;
-  }
-  const results = await db.select().from(ordersTable).orderBy(desc(ordersTable.createdAt)).limit(limit);
-  res.json(results.map(serializeOrder));
+  res.json(dbOrders.slice(0, limit));
 });
 
 router.post("/", async (req, res) => {
