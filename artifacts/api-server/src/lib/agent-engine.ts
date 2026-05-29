@@ -1316,26 +1316,26 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
   let optOpp: OptionOpportunity | null = findBestOptionStrategy(md.price, approxIV, ivCtx, optDirection) ?? null;
 
   // FALLBACK: if engine found nothing, force a simple long call/put based on direction
-  // IV is always >= 20% so there's always an options play
+  // Always use CURRENT market price for strikes — never ATR-derived inflated values
   if (!optOpp) {
     const T = 21 / 365;
-    const r = 0.05;
-    const S = md.price;
+    const S = md.price; // real current price from Alpaca
     const isBear = optDirection === "bearish";
     const type: "call" | "put" = isBear ? "put" : "call";
-    const K = isBear ? Math.round(S * 0.97) : Math.round(S * 1.03);
-    // Use a simple approximation: premium ~ S * IV * sqrt(T) * 0.4 (rough ATM approximation)
-    const premium = Math.max(0.10, S * approxIV * Math.sqrt(T) * 0.4);
-    const contracts_est = Math.max(1, Math.floor((portfolioValue * 0.10) / (premium * 100)));
+    // Strike: 2-3% OTM based on real price
+    const K = isBear
+      ? Math.round(S * 0.97 / 0.5) * 0.5   // round to nearest $0.50
+      : Math.round(S * 1.03 / 0.5) * 0.5;
+    const premium = Math.max(0.05, S * approxIV * Math.sqrt(T) * 0.35);
     optOpp = {
       type, strategy: isBear ? "Long Put" : "Long Call",
       strike: K, expDays: 21, premium: +premium.toFixed(2),
-      delta: isBear ? -0.40 : 0.40, theta: -(premium / 21), vega: +(S * Math.sqrt(T) * 0.3),
+      delta: isBear ? -0.35 : 0.35, theta: -(premium / 21), vega: +(S * Math.sqrt(T) * 0.3),
       iv: approxIV, probabilityOTM: 45, probabilityOfProfit: 55,
-      annualizedReturn: 150, expectedValue: +(premium * 0.3).toFixed(2),
-      kellyFraction: 0.10, maxProfit: premium * 10 * 100, maxLoss: premium * 100,
+      annualizedReturn: 150, expectedValue: +(premium * 0.25).toFixed(2),
+      kellyFraction: 0.08, maxProfit: premium * 8 * 100, maxLoss: premium * 100,
       score: 55,
-      rationale: `21DTE ${isBear ? "Long Put" : "Long Call"} $${K} | IV ${(approxIV*100).toFixed(0)}% | ~$${premium.toFixed(2)} premium | fallback directional`,
+      rationale: `21DTE ${isBear ? "Long Put" : "Long Call"} $${K.toFixed(1)} | S=$${S.toFixed(2)} | IV ${(approxIV*100).toFixed(0)}% | ~$${premium.toFixed(2)} premium`,
       direction: "debit", legs: 1,
     } as OptionOpportunity;
   }

@@ -25,7 +25,7 @@ export const MARKET_UNIVERSE: Record<string, string[]> = {
   // Semiconductors (high volatility, great options)
   semis: ["SMCI", "AVGO", "MU", "TSM", "AMAT", "LRCX", "KLAC", "MRVL", "ON", "TXN"],
   // ETFs with high options volume
-  etfs: ["SPY", "QQQ", "IWM", "XLK", "SOXX", "ARKK", "GLD", "TLT", "VIX", "SQQQ", "TQQQ"],
+  etfs: ["SPY", "QQQ", "IWM", "XLK", "SOXX", "ARKK", "GLD", "TLT", "SQQQ", "TQQQ"],
   // Financials (rate-sensitive, volatile)
   financials: ["JPM", "GS", "MS", "BAC", "C", "WFC", "BLK", "SCHW", "COIN", "HOOD"],
   // Healthcare & Biotech (high IV around FDA events)
