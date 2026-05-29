@@ -613,7 +613,7 @@ export function findBestOptionStrategy(
         const annRet = strat.margin > 0 ? (strat.maxProfit / strat.margin) * (365 / dte) * 100 : 0;
         const kelly = optionsKelly(strat.probabilityOfProfit / 100,
           strat.maxProfit / strat.margin, 1);
-        if (strat.probabilityOfProfit > 68 && strat.netPremium > 0.20 && strat.expectedValue > 0) {
+        if (strat.probabilityOfProfit > 52 && strat.netPremium > 0.05 && strat.expectedValue > -5) {
           opportunities.push({
             type: "put", strategy: "Bull Put Spread", strike: K2, strike2: K1,
             expDays: dte, premium: strat.netPremium / 100, delta: strat.delta,
@@ -640,7 +640,7 @@ export function findBestOptionStrategy(
         const annRet = strat.margin > 0 ? (strat.maxProfit / strat.margin) * (365 / dte) * 100 : 0;
         const kelly = optionsKelly(strat.probabilityOfProfit / 100,
           strat.maxProfit / strat.margin, 1);
-        if (strat.probabilityOfProfit > 68 && strat.netPremium > 0.20 && strat.expectedValue > 0) {
+        if (strat.probabilityOfProfit > 52 && strat.netPremium > 0.05 && strat.expectedValue > -5) {
           opportunities.push({
             type: "call", strategy: "Bear Call Spread", strike: K1, strike2: K2,
             expDays: dte, premium: strat.netPremium / 100, delta: strat.delta,
@@ -669,7 +669,7 @@ export function findBestOptionStrategy(
         const annRet = strat.margin > 0 ? (strat.maxProfit / strat.margin) * (365 / dte) * 100 : 0;
         const kelly = optionsKelly(strat.probabilityOfProfit / 100,
           strat.maxProfit / strat.margin, 1);
-        if (strat.probabilityOfProfit > 60 && strat.netPremium > 0.30 && strat.expectedValue > 0) {
+        if (strat.probabilityOfProfit > 50 && strat.netPremium > 0.05 && strat.expectedValue > -5) {
           opportunities.push({
             type: "call", strategy: "Iron Condor",
             strike: Kp2, strike2: Kc1,  // short strikes
@@ -695,7 +695,7 @@ export function findBestOptionStrategy(
       const annRet = K > 0 ? (strat.maxProfit / (K * 100)) * (365 / dte) * 100 : 0;
       const kelly = optionsKelly(strat.probabilityOfProfit / 100,
         strat.maxProfit / (K * 100), 1);
-      if (strat.probabilityOfProfit > 72 && strat.expectedValue > 0) {
+      if (strat.probabilityOfProfit > 55 && strat.expectedValue > -5) {
         opportunities.push({
           type: "put", strategy: "Cash-Secured Put", strike: K,
           expDays: dte, premium: blackScholes(S, K, T, r, currentIV, "put").price,

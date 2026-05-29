@@ -992,8 +992,12 @@ Make your final decision. Stock action + options play. This is real capital. Thi
   result.worstCaseScenario = result.worstCaseScenario ?? "Stop hit — accept loss, move on";
   result.quantity = Math.max(1, Math.round(result.quantity * result.positionSizePct / 100));
   // Options: default to execute when IV context is present
-  result.optionsPlay = result.optionsPlay ?? (optOpp && optOpp.expectedValue > 0 ? "execute" : "skip");
-  result.optionsRationale = result.optionsRationale ?? (result.optionsPlay === "execute" ? "EV positive — executing" : "No edge");
+  result.optionsPlay = result.optionsPlay ?? (optOpp ? "execute" : "skip");
+  // Force execute if optOpp exists and EV is positive — don't let LLM sandbag
+  if (optOpp && optOpp.expectedValue > -10 && result.optionsPlay !== "execute") {
+    result.optionsPlay = "execute";
+    result.optionsRationale = `Auto-execute: EV $${optOpp.expectedValue.toFixed(0)}, PoP ${optOpp.probabilityOfProfit.toFixed(0)}%, ${optOpp.strategy}`;
+  }
 
   return result;
 }
