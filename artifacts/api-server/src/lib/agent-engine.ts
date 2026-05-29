@@ -1023,16 +1023,17 @@ async function tryPlaceOptionOrder(
     const optionsCapital = portfolioValue * kellyAlloc;
     const contracts = Math.max(1, Math.floor(optionsCapital / (optOpp.premium * 100)));
     let alpacaId: string | undefined;
+    let orderStatus = "simulated"; // default simulated — Alpaca paper doesn't support options without approval
     if (alpaca.isConfigured()) {
       try {
         const ao = await alpaca.placeOptionOrder({ symbol: optSymbol, qty: contracts, side: "buy" });
         alpacaId = ao.id;
+        orderStatus = "filled";
       } catch (optErr: any) {
-        // Log the real error but continue — save as simulated so it shows in dashboard
-        logger.warn({ optErr: optErr?.message ?? optErr, optSymbol, contracts }, "Alpaca options order failed — saving as simulated");
+        logger.warn({ optErr: optErr?.message ?? optErr, optSymbol, contracts }, "Alpaca options rejected — tracking as simulated");
       }
     }
-    // Log to DB
+    // ALWAYS save to DB — simulated options still track P&L
     await db.insert(ordersTable).values({
       symbol: underlying,
       assetType: "option",
@@ -1040,7 +1041,7 @@ async function tryPlaceOptionOrder(
       orderType: "market",
       quantity: contracts.toString(),
       filledPrice: optOpp.premium.toString(),
-      status: alpaca.isConfigured() ? "filled" : "simulated",
+      status: orderStatus,
       agentId: agent.id,
       agentName: agent.name,
       reason: reason.slice(0, 500),
@@ -1292,37 +1293,31 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
       })
     : [approxIV * 0.8, approxIV * 0.9, approxIV, approxIV * 1.1, approxIV * 1.2];
   const ivCtx = analyzeIV(approxIV, ivHistory);
-  const optDirection = compositeScore > 20 ? "bullish" : compositeScore < -20 ? "bearish" : "neutral";
+  // Force bullish/bearish — never "neutral" which causes findBestOptionStrategy to find nothing
+  const optDirection = compositeScore >= 0 ? "bullish" : "bearish";
   let optOpp: OptionOpportunity | null = findBestOptionStrategy(md.price, approxIV, ivCtx, optDirection) ?? null;
 
   // FALLBACK: if engine found nothing, force a simple long call/put based on direction
   // IV is always >= 20% so there's always an options play
   if (!optOpp) {
-    const T = 21 / 365; // 21 DTE
+    const T = 21 / 365;
     const r = 0.05;
     const S = md.price;
-    const K = optDirection === "bearish"
-      ? Math.round(S * 0.97)   // slightly OTM put
-      : Math.round(S * 1.03);  // slightly OTM call
-    const type: "call" | "put" = optDirection === "bearish" ? "put" : "call";
-    const d1 = (Math.log(S / K) + (r + 0.5 * approxIV ** 2) * T) / (approxIV * Math.sqrt(T));
-    const d2 = d1 - approxIV * Math.sqrt(T);
-    const normCDFVal = (x: number) => 0.5 * (1 + Math.sign(x) * Math.sqrt(1 - Math.exp(-2 / Math.PI * x * x)));
-    const premium = type === "call"
-      ? Math.max(0.05, S * normCDFVal(d1) - K * Math.exp(-r * T) * normCDFVal(d2))
-      : Math.max(0.05, K * Math.exp(-r * T) * normCDFVal(-d2) - S * normCDFVal(-d1));
-    const delta = type === "call" ? normCDFVal(d1) : normCDFVal(d1) - 1;
-    const pop = type === "call" ? (1 - normCDFVal(d2)) * 100 : normCDFVal(-d2) * 100;
-    const ev = premium * 0.4; // conservative EV for long options
+    const isBear = optDirection === "bearish";
+    const type: "call" | "put" = isBear ? "put" : "call";
+    const K = isBear ? Math.round(S * 0.97) : Math.round(S * 1.03);
+    // Use a simple approximation: premium ~ S * IV * sqrt(T) * 0.4 (rough ATM approximation)
+    const premium = Math.max(0.10, S * approxIV * Math.sqrt(T) * 0.4);
+    const contracts_est = Math.max(1, Math.floor((portfolioValue * 0.10) / (premium * 100)));
     optOpp = {
-      type, strategy: type === "call" ? "Long Call" : "Long Put",
+      type, strategy: isBear ? "Long Put" : "Long Call",
       strike: K, expDays: 21, premium: +premium.toFixed(2),
-      delta: +delta.toFixed(2), theta: -(premium / 21), vega: +(S * Math.sqrt(T) * 0.4),
-      iv: approxIV, probabilityOTM: +(100 - pop).toFixed(1),
-      probabilityOfProfit: +pop.toFixed(1),
-      annualizedReturn: 200, expectedValue: +ev.toFixed(2),
+      delta: isBear ? -0.40 : 0.40, theta: -(premium / 21), vega: +(S * Math.sqrt(T) * 0.3),
+      iv: approxIV, probabilityOTM: 45, probabilityOfProfit: 55,
+      annualizedReturn: 150, expectedValue: +(premium * 0.3).toFixed(2),
       kellyFraction: 0.10, maxProfit: premium * 10 * 100, maxLoss: premium * 100,
-      score: 60, rationale: `21DTE ${type === "call" ? "Long Call" : "Long Put"} $${K} | IV ${(approxIV*100).toFixed(0)}% | premium $${premium.toFixed(2)} | directional play`,
+      score: 55,
+      rationale: `21DTE ${isBear ? "Long Put" : "Long Call"} $${K} | IV ${(approxIV*100).toFixed(0)}% | ~$${premium.toFixed(2)} premium | fallback directional`,
       direction: "debit", legs: 1,
     } as OptionOpportunity;
   }
