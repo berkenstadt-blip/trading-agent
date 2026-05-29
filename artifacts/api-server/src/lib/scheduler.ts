@@ -17,14 +17,16 @@ function isDST(date: Date): boolean {
   const year = date.getUTCFullYear();
 
   // Second Sunday of March at 2 AM ET (= 7 AM UTC)
-  const marchFirst = new Date(Date.UTC(year, 2, 1));
-  const marchDay   = marchFirst.getUTCDay(); // 0=Sun
-  const dstStart   = new Date(Date.UTC(year, 2, (14 - marchDay) % 7 + 1, 7)); // 2 AM ET = 7 UTC
+  const marchFirst   = new Date(Date.UTC(year, 2, 1));
+  const marchDay     = marchFirst.getUTCDay(); // 0=Sun
+  const firstSunMarch = marchDay === 0 ? 1 : 8 - marchDay;
+  const dstStart     = new Date(Date.UTC(year, 2, firstSunMarch + 7, 7)); // 2 AM ET = 7 UTC
 
   // First Sunday of November at 2 AM ET (= 6 AM UTC, already back to EST)
-  const novFirst = new Date(Date.UTC(year, 10, 1));
-  const novDay   = novFirst.getUTCDay();
-  const dstEnd   = new Date(Date.UTC(year, 10, (7 - novDay) % 7 + 1, 6)); // 2 AM ET = 6 UTC
+  const novFirst  = new Date(Date.UTC(year, 10, 1));
+  const novDay    = novFirst.getUTCDay();
+  const firstSunNov = novDay === 0 ? 1 : 8 - novDay;
+  const dstEnd    = new Date(Date.UTC(year, 10, firstSunNov, 6)); // 2 AM ET = 6 UTC
 
   return date >= dstStart && date < dstEnd;
 }
