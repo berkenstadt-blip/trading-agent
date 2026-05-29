@@ -14,13 +14,22 @@ function headers() {
 
 export function isConfigured() { return true; }
 
-async function alpacaFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, { ...init, headers: { ...headers(), ...(init?.headers ?? {}) } });
-  if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw Object.assign(new Error(`Alpaca ${res.status}: ${text}`), { status: res.status, body: text });
+async function alpacaFetch<T>(url: string, init?: RequestInit, retries = 3): Promise<T> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const res = await fetch(url, { ...init, headers: { ...headers(), ...(init?.headers ?? {}) } });
+    if (res.status === 429) {
+      // Rate limited — back off exponentially
+      const wait = Math.pow(2, attempt) * 1000;
+      await new Promise(r => setTimeout(r, wait));
+      continue;
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw Object.assign(new Error(`Alpaca ${res.status}: ${text}`), { status: res.status, body: text });
+    }
+    return res.json() as Promise<T>;
   }
-  return res.json() as Promise<T>;
+  throw new Error(`Alpaca rate limit: max retries exceeded`);
 }
 
 // ─── Broker API ──────────────────────────────────────────────────────────────

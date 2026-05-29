@@ -1273,7 +1273,8 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
     }
   }
 
-  const approxIV = (technical.atrPct / 100) * Math.sqrt(252);
+  // IV floor: real stocks always have at least 20% annualized vol — low ATR from bad data = bad IV
+  const approxIV = Math.max(0.20, (technical.atrPct / 100) * Math.sqrt(252));
   // Use 52-bar ATR history to simulate historical IV distribution
   const ivHistory = md.bars.closes.length >= 20
     ? md.bars.closes.slice(-40).map((_, i, arr) => {
