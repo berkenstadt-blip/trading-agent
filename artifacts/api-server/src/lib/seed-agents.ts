@@ -86,17 +86,10 @@ const AGENTS = [
 ];
 
 export async function seedAgents() {
-  const existing = await db.select().from(agentsTable);
-  const existingNames = new Set(existing.map(a => a.name));
+  // Clear all existing agents and re-seed fresh — ensures correct config always
+  await db.delete(agentsTable);
 
-  const toInsert = AGENTS.filter(a => !existingNames.has(a.name));
-
-  if (toInsert.length === 0) {
-    logger.info("All agents already seeded — skipping");
-    return;
-  }
-
-  for (const a of toInsert) {
+  for (const a of AGENTS) {
     await db.insert(agentsTable).values({
       name: a.name,
       strategy: a.strategy,
@@ -110,8 +103,7 @@ export async function seedAgents() {
       totalPnl: "0",
       lastRunAt: new Date(),
     });
-    logger.info({ name: a.name }, "Agent seeded");
   }
 
-  logger.info({ count: toInsert.length }, "Agents seeded successfully");
+  logger.info({ count: AGENTS.length }, "Agents seeded fresh");
 }

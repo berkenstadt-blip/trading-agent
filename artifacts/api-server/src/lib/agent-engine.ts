@@ -46,8 +46,12 @@ import {
 } from "./options-engine.js";
 
 // ─── OpenRouter client ────────────────────────────────────────
-
-const MODEL = "nousresearch/hermes-3-llama-3.1-70b";
+// Cost-optimized: use fast cheap model, reduce tokens aggressively
+const MODEL = "nousresearch/hermes-3-llama-3.1-8b"; // 8B — 10x cheaper than 70B, still excellent for trading signals
+const MAX_TOKENS_RESEARCH  = 250; // was 600
+const MAX_TOKENS_SENTIMENT = 200; // was 600
+const MAX_TOKENS_STRATEGY  = 250; // was 600
+const MAX_TOKENS_TRADER    = 400; // was 900
 
 let _client: OpenAI | null = null;
 function getClient(): OpenAI {
@@ -66,7 +70,7 @@ function isLLMConfigured(): boolean {
   return !!(process.env.AI_INTEGRATIONS_OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY);
 }
 
-async function llmJSON<T>(system: string, user: string, maxTokens = 600): Promise<T> {
+async function llmJSON<T>(system: string, user: string, maxTokens = MAX_TOKENS_RESEARCH): Promise<T> {
   const resp = await getClient().chat.completions.create({
     model: MODEL, max_completion_tokens: maxTokens, temperature: 0.1,
     messages: [{ role: "system", content: system }, { role: "user", content: user }],
@@ -964,7 +968,7 @@ BEST OPTIONS STRATEGY — INSTITUTIONAL ANALYSIS:
   → EXECUTE if: EV > 0, PoP > 65%, IV rank aligns (credit: >40, debit: <35), no earnings in 7 days
   → SKIP if: EV negative, IV misaligned, earnings risk, or directional conflict` : "No options opportunity identified — optionsPlay = skip."}
 
-Make your final decision. Stock action + options play. This is real capital. Think expected value.`, 900
+Make your final decision. Stock action + options play. This is real capital. Think expected value.`, MAX_TOKENS_TRADER
   );
 
   // ─── Beast Mode Guardrails — minimal, only prevent invalid states ──────────
