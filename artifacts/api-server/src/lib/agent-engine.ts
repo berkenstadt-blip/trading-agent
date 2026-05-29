@@ -1024,8 +1024,13 @@ async function tryPlaceOptionOrder(
     const contracts = Math.max(1, Math.floor(optionsCapital / (optOpp.premium * 100)));
     let alpacaId: string | undefined;
     if (alpaca.isConfigured()) {
-      const ao = await alpaca.placeOptionOrder({ symbol: optSymbol, qty: contracts, side: "buy" });
-      alpacaId = ao.id;
+      try {
+        const ao = await alpaca.placeOptionOrder({ symbol: optSymbol, qty: contracts, side: "buy" });
+        alpacaId = ao.id;
+      } catch (optErr: any) {
+        // Log the real error but continue — save as simulated so it shows in dashboard
+        logger.warn({ optErr: optErr?.message ?? optErr, optSymbol, contracts }, "Alpaca options order failed — saving as simulated");
+      }
     }
     // Log to DB
     await db.insert(ordersTable).values({
@@ -1289,6 +1294,7 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
   const ivCtx = analyzeIV(approxIV, ivHistory);
   const optDirection = compositeScore > 20 ? "bullish" : compositeScore < -20 ? "bearish" : "neutral";
   const optOpp: OptionOpportunity | null = findBestOptionStrategy(md.price, approxIV, ivCtx, optDirection) ?? null;
+  logger.info({ symbol, approxIV: approxIV.toFixed(3), ivRank: ivCtx.ivRank, ivRegime: ivCtx.regime, optDirection, optOppFound: !!optOpp, optStrategy: optOpp?.strategy ?? "none", optEV: optOpp?.expectedValue?.toFixed(2) ?? "n/a" }, "Options analysis");
 
   const trader = await runTrader(agent, symbol, md, research, sentiment, technical, existingPos, maxQty, compositeScore, ivCtx, optOpp, existingPositionSymbols)
     .catch(err => ({
