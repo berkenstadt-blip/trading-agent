@@ -1119,9 +1119,11 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
 
   type OrderRow = typeof recentOrders[number];
   const stats = computeTradeStats(
-    recentOrders.map((o: OrderRow) => ({
-      filledPrice: o.filledPrice, side: o.side, quantity: o.quantity, agentId: o.agentId
-    }))
+    recentOrders
+      .filter((o: OrderRow) => o.filledPrice !== null)
+      .map((o: OrderRow) => ({
+        filledPrice: o.filledPrice as string, side: o.side, quantity: o.quantity, agentId: o.agentId
+      }))
   );
 
   const breaker = checkCircuitBreaker({
