@@ -4,11 +4,7 @@ import { logger } from "./lib/logger.js";
 import { attachWebSocketServer } from "./ws/price-stream.js";
 import { startScheduler } from "./lib/scheduler.js";
 
-const rawPort = process.env["PORT"];
-
-if (!rawPort) {
-  throw new Error("PORT environment variable is required but was not provided.");
-}
+const rawPort = process.env["PORT"] ?? "8080";
 
 const port = Number(rawPort);
 
