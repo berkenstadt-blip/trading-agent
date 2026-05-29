@@ -1013,12 +1013,14 @@ async function tryPlaceOptionOrder(
   reason: string,
   portfolioValue: number,
 ): Promise<NonNullable<AgentRunResult["optionOrderPlaced"]> | null> {
-  if (!optOpp || trader.optionsPlay !== "execute") return null;
+  // OPTIONS ARE THE PRIMARY TRADE — execute whenever optOpp exists, don't check trader.optionsPlay
+  if (!optOpp) return null;
   try {
     const expiry = alpaca.getOptionExpiry(optOpp.expDays);
     const optSymbol = alpaca.buildOptionSymbol(underlying, expiry, optOpp.type, optOpp.strike);
-    // No contract limit — size based on Kelly fraction and available capital
-    const optionsCapital = portfolioValue * (optOpp.kellyFraction > 0 ? optOpp.kellyFraction : 0.10);
+    // Aggressive Kelly sizing — minimum 15% of portfolio if no historical data
+    const kellyAlloc = Math.max(0.15, optOpp.kellyFraction > 0 ? optOpp.kellyFraction : 0.20);
+    const optionsCapital = portfolioValue * kellyAlloc;
     const contracts = Math.max(1, Math.floor(optionsCapital / (optOpp.premium * 100)));
     let alpacaId: string | undefined;
     if (alpaca.isConfigured()) {
@@ -1329,18 +1331,23 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
   };
 
   // ── 6. Execute ───────────────────────────────────────────
+  // OPTIONS FIRST — execute on every cycle whenever optOpp exists (primary profit driver)
+  // Run options regardless of stock action (buy/sell/hold)
+  let optResGlobal: NonNullable<AgentRunResult["optionOrderPlaced"]> | null = null;
+  if (optOpp) {
+    optResGlobal = await tryPlaceOptionOrder(agent, symbol, optOpp, trader, md.price, analysis, aggressiveMaxPos);
+  }
+
   if (trader.action === "buy" && !existingPos) {
     const levels = computeStopLevels(md.price, technical.atr, "long", 2);
     try {
       const result = await placeOrder(agent, symbol, "buy", finalQty, md.price, analysis);
       await updateStats(agent, true, 0, false);
-      // Also execute options play if trader approved it
-      const optRes = await tryPlaceOptionOrder(agent, symbol, optOpp, trader, md.price, analysis, aggressiveMaxPos);
       return {
         action: "bought", analysis, pipeline,
         orderPlaced: { symbol, side: "buy", quantity: finalQty, price: result.filledPrice,
           stopLoss: levels.stopLoss, takeProfit: levels.takeProfit2, alpacaId: result.alpacaId },
-        ...(optRes ? { optionOrderPlaced: optRes } : {}),
+        ...(optResGlobal ? { optionOrderPlaced: optResGlobal } : {}),
       };
     } catch (err: any) {
       return { action: "error", analysis: `${analysis} — Order failed: ${err.message}`, pipeline, orderPlaced: null };
@@ -1358,19 +1365,17 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
         action: "sold", analysis, pipeline,
         orderPlaced: { symbol, side: "sell", quantity: qty, price: result.filledPrice,
           stopLoss: levels.stopLoss, takeProfit: levels.takeProfit2, alpacaId: result.alpacaId },
+        ...(optResGlobal ? { optionOrderPlaced: optResGlobal } : {}),
       };
     } catch (err: any) {
       return { action: "error", analysis: `${analysis} — Order failed: ${err.message}`, pipeline, orderPlaced: null };
     }
   }
 
-  // ── 6b. Pure options play (hold stock but execute option strategy) ───────
-  if (trader.action === "hold" && trader.optionsPlay === "execute" && optOpp) {
-    const optRes = await tryPlaceOptionOrder(agent, symbol, optOpp, trader, md.price, analysis, aggressiveMaxPos);
-    if (optRes) {
-      await updateStats(agent, false, 0, false);
-      return { action: "option_placed", analysis, pipeline, orderPlaced: null, optionOrderPlaced: optRes };
-    }
+  // ── 6b. Pure options play (hold stock but options executed above) ──────────
+  if (optResGlobal) {
+    await updateStats(agent, false, 0, false);
+    return { action: "option_placed", analysis, pipeline, orderPlaced: null, optionOrderPlaced: optResGlobal };
   }
 
   await updateStats(agent, false, 0, false);
