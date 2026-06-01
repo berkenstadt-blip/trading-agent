@@ -47,8 +47,8 @@ import {
 
 // ─── OpenRouter client ────────────────────────────────────────
 // Two models: heavy (70B) for research/sentiment quality, fast (8B) for trader speed
-const MODEL_HEAVY = "nousresearch/hermes-3-llama-3.1-8b"; // all agents on 8B — 10x cheaper
-const MODEL_FAST  = "nousresearch/hermes-3-llama-3.1-8b";  // trader decision — fast + cheap
+const MODEL_HEAVY = "meta-llama/llama-3.1-8b-instruct"; // cheap + fast, valid on OpenRouter
+const MODEL_FAST  = "meta-llama/llama-3.1-8b-instruct";  // trader decision
 const MAX_TOKENS_RESEARCH  = 600;
 const MAX_TOKENS_SENTIMENT = 600;
 const MAX_TOKENS_STRATEGY  = 600;
