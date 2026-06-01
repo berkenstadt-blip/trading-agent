@@ -1097,15 +1097,21 @@ async function placeOrder(
 ): Promise<{ orderId: number; alpacaId?: string; filledPrice: number }> {
   let alpacaId: string | undefined;
   let filledPrice = price;
+  let orderStatus = "simulated";
   if (alpaca.isConfigured()) {
-    const ao = await alpaca.placeOrder({ symbol, qty: quantity, side, type: "market", time_in_force: "day" });
-    alpacaId = ao.id;
-    if (ao.filled_avg_price) filledPrice = parseFloat(ao.filled_avg_price);
+    try {
+      const ao = await alpaca.placeOrder({ symbol, qty: quantity, side, type: "market", time_in_force: "day" });
+      alpacaId = ao.id;
+      if (ao.filled_avg_price) filledPrice = parseFloat(ao.filled_avg_price);
+      orderStatus = "filled";
+    } catch (alpacaErr: any) {
+      logger.warn({ err: alpacaErr?.message ?? alpacaErr, symbol, side }, "Alpaca stock order rejected — tracking as simulated");
+    }
   }
   const [order] = await db.insert(ordersTable).values({
     symbol, assetType: "stock", side, orderType: "market",
     quantity: quantity.toString(), filledPrice: filledPrice.toString(),
-    status: "filled", agentId: agent.id, agentName: agent.name,
+    status: orderStatus, agentId: agent.id, agentName: agent.name,
     reason: reason.slice(0, 500), filledAt: new Date(),
   }).returning();
   return { orderId: order.id, alpacaId, filledPrice };
