@@ -49,10 +49,11 @@ import {
 // Two models: heavy (70B) for research/sentiment quality, fast (8B) for trader speed
 const MODEL_HEAVY = "nousresearch/hermes-3-llama-3.1-8b"; // all agents on 8B — 10x cheaper
 const MODEL_FAST  = "nousresearch/hermes-3-llama-3.1-8b";  // trader decision — fast + cheap
-const MAX_TOKENS_RESEARCH  = 400;
-const MAX_TOKENS_SENTIMENT = 300;
-const MAX_TOKENS_STRATEGY  = 350;
-const MAX_TOKENS_TRADER    = 500;
+const MAX_TOKENS_RESEARCH = 600;
+const MAX_TOKENS_SENTIMENT = 600;
+const MAX_TOKENS_STRATEGY  = 600;
+const MAX_TOKENS_TRADER    = 900;
+const MAX_TOKENS_TRADER    = 900;
 
 let _client: OpenAI | null = null;
 function getClient(): OpenAI {
