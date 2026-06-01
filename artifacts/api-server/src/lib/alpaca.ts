@@ -1,8 +1,8 @@
 const BASE_URL = "https://paper-api.alpaca.markets/v2";
 const DATA_URL = "https://data.alpaca.markets/v2";
 
-const ALPACA_KEY    = "PKHQ3AEBSSLAUNMUL5HRKQVW7H";
-const ALPACA_SECRET = "HqSzQ37z8zPivvZz9yMrt4QefMLP4fvpWErgXMXVR8RB";
+const ALPACA_KEY    = process.env.ALPACA_API_KEY    ?? "PKHQ3AEBSSLAUNMUL5HRKQVW7H";
+const ALPACA_SECRET = process.env.ALPACA_SECRET_KEY ?? "";
 
 function headers() {
   return {
