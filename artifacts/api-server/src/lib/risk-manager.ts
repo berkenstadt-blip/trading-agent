@@ -8,26 +8,28 @@
 
 // ─── Market Hours ─────────────────────────────────────────────
 
-function isDST(): boolean {
+/** Get current ET time in minutes since midnight — handles DST via Intl (works on UTC servers) */
+function getETMinutes(): { etMins: number; etDay: number } {
   const now = new Date();
-  const jan = new Date(now.getFullYear(), 0, 1).getTimezoneOffset();
-  const jul = new Date(now.getFullYear(), 6, 1).getTimezoneOffset();
-  return now.getTimezoneOffset() < Math.max(jan, jul);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric", minute: "numeric", weekday: "short", hour12: false,
+  }).formatToParts(now);
+  const hour    = parseInt(parts.find(p => p.type === "hour")!.value, 10);
+  const minute  = parseInt(parts.find(p => p.type === "minute")!.value, 10);
+  const weekday = parts.find(p => p.type === "weekday")!.value; // "Sun","Mon",...
+  const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return { etMins: hour * 60 + minute, etDay: dayMap[weekday] ?? now.getUTCDay() };
 }
 
 export function isMarketOpen(): boolean {
-  const now = new Date();
-  const etOff = isDST() ? -4 : -5;
-  const etMins = ((now.getUTCHours() + 24 + etOff) % 24) * 60 + now.getUTCMinutes();
-  const day = now.getUTCDay();
-  if (day === 0 || day === 6) return false;
+  const { etMins, etDay } = getETMinutes();
+  if (etDay === 0 || etDay === 6) return false;
   return etMins >= 570 && etMins < 945; // 9:30–15:45 ET
 }
 
 export function minutesToMarketClose(): number {
-  const now = new Date();
-  const etOff = isDST() ? -4 : -5;
-  const etMins = ((now.getUTCHours() + 24 + etOff) % 24) * 60 + now.getUTCMinutes();
+  const { etMins } = getETMinutes();
   return Math.max(0, 960 - etMins); // 16:00 = 960 min
 }
 
