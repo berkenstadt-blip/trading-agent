@@ -95,16 +95,23 @@ router.post("/:id/run", async (req, res) => {
   const [agent] = await db.select().from(agentsTable).where(eq(agentsTable.id, id));
   if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
 
-  const result = await runAgentLogic(agent);
-  res.json({
-    agentId: agent.id,
-    agentName: agent.name,
-    strategy: agent.strategy,
-    analysis: result.analysis,
-    action: result.action,
-    orderPlaced: result.orderPlaced,
-    timestamp: new Date().toISOString(),
-  });
+  try {
+    const result = await runAgentLogic(agent);
+    res.json({
+      agentId: agent.id,
+      agentName: agent.name,
+      strategy: agent.strategy,
+      analysis: result.analysis,
+      action: result.action,
+      orderPlaced: result.orderPlaced,
+      optionOrderPlaced: result.optionOrderPlaced ?? null,
+      pipeline: result.pipeline ?? null,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    console.error("[run] agent error:", err);
+    res.status(500).json({ error: err?.message ?? "Unknown error", action: "error" });
+  }
 });
 
 export { router as agentsRouter };

@@ -31,4 +31,10 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
+// Global error handler — catches any unhandled errors and returns JSON
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  logger.error({ err: err?.message, stack: err?.stack, url: req.url }, "Unhandled error");
+  res.status(500).json({ error: err?.message ?? "Internal server error" });
+});
+
 export default app;
