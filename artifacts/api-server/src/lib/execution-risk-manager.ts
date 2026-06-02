@@ -65,7 +65,14 @@ async function manageStockPositions(positions: alpaca.AlpacaPosition[]): Promise
 
     if (closeReason) {
       try {
-        await alpaca.closePosition(symbol);
+        await alpaca.closePosition(symbol).catch((e: any) => {
+          // 501 = paper trading limitation, 422 = position already closed — both are fine, log and continue
+          if (e?.status === 501 || e?.status === 422 || e?.status === 404) {
+            logger.warn({ symbol, status: e.status }, "Risk Manager: closePosition not supported in paper (continuing)");
+          } else {
+            throw e;
+          }
+        });
         // Log to DB
         const qty = parseFloat(pos.qty);
         const currentPrice = parseFloat(pos.current_price);
