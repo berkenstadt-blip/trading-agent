@@ -6,7 +6,7 @@ import { runRiskManagement } from "./execution-risk-manager.js";
 import { logger } from "./logger.js";
 
 // ─── Config — Beast Mode ──────────────────────────────────────
-const INTERVAL_MS = 30 * 60 * 1000; // 30 minutes — max cost reduction
+const INTERVAL_MS = 3 * 60 * 1000; // 3 minutes — Beast Mode, full scan frequency
 
 let schedulerHandle: ReturnType<typeof setInterval> | null = null;
 
@@ -43,16 +43,10 @@ async function runAllActiveAgents() {
     return;
   }
 
-  // Cost optimization: rotate through agents, max 3 per cycle
-  // Priority: Options Hunter, Earnings Sniper, Volatility Crusher first
-  const PRIORITY = ["Options Hunter", "Earnings Sniper", "Volatility Crusher"];
-  const priority = allAgents.filter(a => PRIORITY.includes(a.name));
-  const rest = allAgents.filter(a => !PRIORITY.includes(a.name));
-  // Pick 1 random non-priority agent per cycle to rotate coverage
-  const tickIdx = Math.floor(Date.now() / INTERVAL_MS) % Math.max(1, rest.length);
-  const agents = [...priority, ...(rest[tickIdx] ? [rest[tickIdx]] : [])].slice(0, 2); // max 2 agents/tick = 8 LLM calls/hr vs 32
+  // Beast Mode: run ALL active agents in parallel, no cap
+  const agents = allAgents;
 
-  logger.info({ count: agents.length, names: agents.map((a: any) => a.name) }, "Scheduler: running agents (cost-optimized)");
+  logger.info({ count: agents.length, names: agents.map((a) => a.name) }, "Scheduler: running all agents in parallel (Beast Mode)");
 
   // ── RISK MANAGEMENT FIRST — stop losses, take profits, option lifecycle ──
   const riskResult = await runRiskManagement().catch(e => {
@@ -65,9 +59,9 @@ async function runAllActiveAgents() {
     return;
   }
 
-  // ── AGENT LOGIC ──
+  // ── AGENT LOGIC — parallel execution, Beast Mode ──
 
-  for (const agent of agents) {
+  await Promise.all(agents.map(async (agent) => {
     try {
       const result = await runAgentLogic(agent);
       logger.info(
@@ -89,7 +83,7 @@ async function runAllActiveAgents() {
     } catch (err) {
       logger.error({ err, agentId: agent.id, agentName: agent.name }, "Scheduler: agent threw");
     }
-  }
+  }));
 }
 
 export function startScheduler() {

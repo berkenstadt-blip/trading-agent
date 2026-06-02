@@ -46,13 +46,13 @@ import {
 } from "./options-engine.js";
 
 // ─── OpenRouter client ────────────────────────────────────────
-// Two models: heavy (70B) for research/sentiment quality, fast (8B) for trader speed
-const MODEL_HEAVY = "meta-llama/llama-3.1-8b-instruct"; // cheap + fast, valid on OpenRouter
-const MODEL_FAST  = "meta-llama/llama-3.1-8b-instruct";  // trader decision
-const MAX_TOKENS_RESEARCH  = 600;
-const MAX_TOKENS_SENTIMENT = 600;
-const MAX_TOKENS_STRATEGY  = 600;
-const MAX_TOKENS_TRADER    = 900;
+// Two models: heavy (70B) for research/sentiment/strategy quality, fast (8B) for trader speed
+const MODEL_HEAVY = "meta-llama/llama-3.3-70b-instruct"; // genuine 70B — better analysis quality
+const MODEL_FAST  = "meta-llama/llama-3.1-8b-instruct";  // fast 8B for trader execution decision
+const MAX_TOKENS_RESEARCH  = 900;  // more room for deep macro + institutional analysis
+const MAX_TOKENS_SENTIMENT = 800;  // news + social signal synthesis
+const MAX_TOKENS_STRATEGY  = 800;  // multi-indicator technical reasoning
+const MAX_TOKENS_TRADER    = 1000; // full conviction + options decision output
 
 let _client: OpenAI | null = null;
 function getClient(): OpenAI {
@@ -793,7 +793,7 @@ Sentiment: ${sentiment.overallSentiment.toUpperCase()} (${sentiment.sentimentSco
 Catalysts: ${research.catalysts.join(" | ") || "none"}
 Squeeze Risk: ${sentiment.shortSqueezeRisk ? "🔥 YES" : "no"} | Catalyst Imminent: ${sentiment.catalystImminent ? "⚠️ YES" : "no"}
 
-Grade this setup. Find the entry. Be specific.`, MAX_TOKENS_STRATEGY, MODEL_FAST
+Grade this setup. Find the entry. Be specific.`, MAX_TOKENS_STRATEGY, MODEL_HEAVY
   );
 
   return {
