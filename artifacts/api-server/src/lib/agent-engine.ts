@@ -1169,11 +1169,23 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
       }))
   );
 
+  // Use REAL Alpaca equity for circuit breaker — not stale DB totalPnl
+  let realEquity = 100000;
+  let realLastEquity = 100000;
+  try {
+    if (alpaca.isConfigured()) {
+      const acct = await alpaca.getAccount();
+      realEquity = parseFloat(acct.equity || acct.portfolio_value || "100000");
+      realLastEquity = parseFloat(acct.last_equity || acct.equity || "100000");
+    }
+  } catch { /* use defaults */ }
+  const realDailyPnL = realEquity - realLastEquity;
+
   const breaker = checkCircuitBreaker({
-    dailyPnL: parseFloat(agent.totalPnl),
-    initialCapital: 100000,
-    peakPortfolioValue: 100000 + Math.max(0, parseFloat(agent.totalPnl)),
-    currentPortfolioValue: 100000 + parseFloat(agent.totalPnl),
+    dailyPnL: realDailyPnL,
+    initialCapital: realLastEquity,
+    peakPortfolioValue: Math.max(realEquity, realLastEquity),
+    currentPortfolioValue: realEquity,
     consecutiveLosses: stats.consecutiveLosses,
     minutesToClose: minsToClose,
   });
@@ -1219,8 +1231,8 @@ export async function runAgentLogic(agent: typeof agentsTable.$inferSelect): Pro
   }
 
   // Use REAL buying power from Alpaca — never spend more than available cash
-  let portfolioValue = 100000 + parseFloat(agent.totalPnl);
-  let availableCash = portfolioValue * 0.95; // conservative default
+  let portfolioValue = realEquity;
+  let availableCash = realEquity * 0.95; // conservative default
   if (alpaca.isConfigured()) {
     try {
       const account = await alpaca.getAccount();
