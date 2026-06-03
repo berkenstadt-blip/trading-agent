@@ -1,11 +1,25 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { agentsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { CreateAgentBody, UpdateAgentBody } from "@workspace/api-zod";
 import { runAgentLogic } from "../lib/scheduler.js";
+import { ordersTable, portfolioTable, positionsTable } from "@workspace/db";
 
 const router = Router();
+
+// ─── Reset all simulated data ────────────────────────────────
+router.post("/reset-db", async (_req, res) => {
+  try {
+    await db.delete(ordersTable);
+    await db.delete(positionsTable);
+    // Reset agent totalPnl and totalTrades
+    await db.update(agentsTable).set({ totalPnl: "0", totalTrades: 0, winRate: "0" });
+    res.json({ success: true, message: "DB reset: orders, positions, agent stats cleared." });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 function parseSymbols(val: string): string[] {
   try { return JSON.parse(val); } catch { return []; }
