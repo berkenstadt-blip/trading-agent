@@ -288,7 +288,7 @@ export async function runRiskManagement(): Promise<RiskCheckResult> {
     }
 
   } catch (e: any) {
-    logger.error({ e: e.message }, "Risk Manager: error during risk check");
+    if (!e?.silent) logger.error({ e: e.message }, "Risk Manager: error during risk check");
   }
 
   return result;

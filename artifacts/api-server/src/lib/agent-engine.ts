@@ -231,8 +231,9 @@ async function fetchMarketData(symbol: string): Promise<MarketData> {
         changePercent = +((change / prevClose) * 100).toFixed(4);
         high = price * 1.005; low = price * 0.995; open = prevClose; volume = 1000000;
         logger.info({ symbol, price, source: "cache" }, "Using cached price — Alpaca rate limited");
-      } else {
-        logger.warn({ e, symbol }, "Snapshot failed — no cache, using synthetic");
+      } else if (!(e as any)?.silent) {
+        // Only log if not a silenced 401 repeated failure
+        logger.warn({ symbol }, "Snapshot failed — no cache, using synthetic");
       }
     }
 
@@ -247,12 +248,12 @@ async function fetchMarketData(symbol: string): Promise<MarketData> {
           bars.lows.push(Math.min(low, price)); bars.volumes.push(volume); bars.opens.push(open);
         }
       }
-    } catch (e) { logger.warn({ e, symbol }, "Bars failed"); }
+    } catch (e) { if (!(e as any)?.silent) logger.warn({ symbol }, "Bars failed"); }
 
     try {
       const articles = await alpaca.getNews(symbol, 15);
       news = articles.map(a => ({ headline: a.headline, summary: (a.summary ?? "").slice(0, 300), created_at: a.created_at }));
-    } catch (e) { logger.warn({ e, symbol }, "News failed"); }
+    } catch (e) { if (!(e as any)?.silent) logger.warn({ symbol }, "News failed"); }
   }
 
   if (price === 0) {

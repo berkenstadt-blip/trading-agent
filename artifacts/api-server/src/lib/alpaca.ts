@@ -27,9 +27,27 @@ export function getCachedPrice(symbol: string): number | null {
   return null;
 }
 
+// ─── 401 circuit breaker — log once, silence for 10 min ──────
+let _alpaca401At = 0;
+let _alpaca401Logged = false;
+export function isAlpacaUnauthorized(): boolean {
+  return _alpaca401At > 0 && Date.now() - _alpaca401At < 10 * 60 * 1000;
+}
+
 async function alpacaFetch<T>(url: string, init?: RequestInit, retries = 3): Promise<T> {
+  // Skip immediately if we know Alpaca is unauthorized (silent for 10 min)
+  if (isAlpacaUnauthorized()) throw Object.assign(new Error("Alpaca 401: unauthorized (cached — no retry for 10min)"), { status: 401, silent: true });
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     const res = await fetch(url, { ...init, headers: { ...headers(), ...(init?.headers ?? {}) } });
+    if (res.status === 401) {
+      _alpaca401At = Date.now();
+      const msg = !_alpaca401Logged
+        ? "Alpaca 401: invalid credentials — set ALPACA_API_KEY + ALPACA_SECRET_KEY in Replit Secrets. Running in full simulation mode."
+        : "Alpaca 401: unauthorized (cached — no retry for 10min)";
+      _alpaca401Logged = true;
+      throw Object.assign(new Error(`Alpaca 401: ${msg}`), { status: 401, silent: _alpaca401Logged });
+    }
     if (res.status === 429) {
       // Rate limited — back off exponentially
       const wait = Math.pow(2, attempt) * 1000;
